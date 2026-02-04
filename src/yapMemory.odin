@@ -59,7 +59,7 @@ PushSize :: proc(
 	destinationAdress: uintptr = cast(uintptr)Arena.BasePointer + Arena.Used
 	memoryOffset: uintptr = 0
 	alignmentMask := Alignment - 1
-	if (destinationAdress & alignmentMask) != 0 {
+	if Alignment > 0 && (destinationAdress & alignmentMask) != 0 {
 		memoryOffset = Alignment - (destinationAdress & alignmentMask)
 	}
 	Size += memoryOffset
