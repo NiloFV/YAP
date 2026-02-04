@@ -7,7 +7,7 @@
             "preLaunchTask": "build_Debug",
             "name": "RunDebug",
             "program": "${workspaceFolder}/build/yap.exe",
-            "args": ["res/testScript.yap"],
+            "args": ["res/simpleTest.yap"],
             "cwd": "${workspaceFolder}"            
         },         
     ]

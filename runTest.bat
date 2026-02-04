@@ -1,4 +1,4 @@
 @echo off
 call build.bat
-START .\build\yap.exe res/testScript.yap
+START .\build\yap.exe res/simpleTest.yap
 

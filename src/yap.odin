@@ -1,7 +1,9 @@
 package src
 
 import "core:fmt"
+import "core:math"
 import "core:os"
+
 
 PRE_ALOCATED_MEM_MB :: 256
 
@@ -10,14 +12,16 @@ TokenType :: enum {
 	Dash,
 	DoubleDash,
 	Equal,
-	EndOfLine,
 	Word,
+	EndOfLine,
+	EndOfFile,
 }
 
 Token :: struct {
-	Type:      TokenType,
-	ValueLow:  i32,
-	ValueHigh: i32,
+	Type:        TokenType,
+	using Block: TextBlock,
+	Line:        i32,
+	Column:      i32,
 }
 
 Lexer :: struct {
@@ -25,6 +29,37 @@ Lexer :: struct {
 	Tokens:     [^]Token,
 	TokenCount: u32,
 }
+
+Parser :: struct {
+	Lex:          ^Lexer,
+	CurrentToken: u32,
+}
+
+ParseError :: enum {
+	None,
+	NoWorldBlockAfterDash,
+	SceneWithNoLines,
+}
+
+TextBlock :: struct {
+	IndexLow:  i32,
+	IndexHigh: i32,
+}
+
+
+SceneNode :: struct {
+	Content:     string,
+	Transitions: [^]u32,
+}
+
+SceneGraph :: struct {
+	Nodes: [^]SceneNode,
+}
+
+YapFile :: struct {
+	Scenes: [^]SceneGraph,
+}
+
 
 main :: proc() {
 
@@ -36,8 +71,6 @@ main :: proc() {
 
 	fmt.println(">File read with success")
 
-	//fmt.printfln("\n%s\n", text)
-
 	mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 	arena: MemoryArena
 	InitializeArena(&arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
@@ -48,14 +81,11 @@ main :: proc() {
 	lex.TokenCount = 1
 	Tokenize(&arena, &lex)
 
-	for i: u32 = 1; i < lex.TokenCount; i += 1 {
-		if lex.Tokens[i].Type == .EndOfLine {
-			fmt.printfln("%s", lex.Tokens[i].Type)
+	PrintLexer(&lex)
 
-		} else {
-			fmt.printfln("%s %24s", lex.Tokens[i].Type, lex.Source[ lex.Tokens[i].ValueLow:  lex.Tokens[i].ValueHigh])
-		}
-	}
+	parser: Parser
+	parser.Lex = &lex
+
 
 	fmt.println("\n... press RETURN to continue")
 	buf: [1]u8
@@ -65,41 +95,47 @@ main :: proc() {
 Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 
 	indexLow: int
+	line: i32
+	column: i32
 
 	for i := 0; i < len(Lex.Source); i += 1 {
 		currentCharacter := &Lex.Source[i]
 		switch currentCharacter^ {
 		case '-':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i)
+			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
 			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
 			if lastTok.Type == .Dash {
 				lastTok.Type = .DoubleDash
-				lastTok.ValueHigh += 1
+				lastTok.IndexHigh += 1
 			} else {
-				PushToken(Arena, Lex, .Dash, i, i + 1)
+				PushToken(Arena, Lex, .Dash, i, i + 1, line, column + 1)
 			}
 		case '=':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i)
+			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
-			PushToken(Arena, Lex, .Equal, i, i + 1)
+			PushToken(Arena, Lex, .Equal, i, i + 1, line, column + 1)
 		case '\n':
 			indexLow = i + 1
 			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
 			if lastTok.Type != .EndOfLine {
-				PushToken(Arena, Lex, .EndOfLine, i, i + 1)
+				PushToken(Arena, Lex, .EndOfLine, i, i + 1, line, column)
 			}
+			column = -1
+			line += 1
 		case ' ':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i)
+			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
 		case '\r':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i)
+			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
 		case '\t':
-			indexLow = i + 1			
+			indexLow = i + 1
 		}
+		column += 1
 	}
-	TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, len(Lex.Source)-1)
+	TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, len(Lex.Source) - 1, line, column)
+	PushToken(Arena, Lex, .EndOfFile, len(Lex.Source) - 1, len(Lex.Source) - 1, line, column)
 }
 
 
@@ -109,9 +145,11 @@ TryFlushWordToken :: proc(
 	Tok: TokenType,
 	#any_int ContentLow: i32,
 	#any_int ContentHigh: i32,
+	#any_int Line: i32,
+	#any_int Column: i32,
 ) {
 	if ContentHigh > ContentLow {
-		PushToken(Arena, Lex, .Word, ContentLow, ContentHigh)
+		PushToken(Arena, Lex, .Word, ContentLow, ContentHigh, Line, Column)
 	}
 }
 
@@ -121,10 +159,178 @@ PushToken :: proc(
 	Tok: TokenType,
 	#any_int ContentLow: i32,
 	#any_int ContentHigh: i32,
+	#any_int Line: i32,
+	#any_int Column: i32,
 ) {
 	tk := PushStruct(Arena, Token, 0)
 	tk.Type = Tok
-	tk.ValueLow = ContentLow
-	tk.ValueHigh = ContentHigh
+	tk.IndexLow = ContentLow
+	tk.IndexHigh = ContentHigh
+	tk.Line = Line
+	tk.Column = Column - (ContentHigh - ContentLow)
 	Lex.TokenCount += 1
+}
+
+PrintLexer :: proc(Lex: ^Lexer) {
+	for i: u32 = 1; i < Lex.TokenCount; i += 1 {
+		if Lex.Tokens[i].Type == .EndOfLine || Lex.Tokens[i].Type == .EndOfFile {
+			fmt.printfln(
+				"%s (%d %d)",
+				Lex.Tokens[i].Type,
+				Lex.Tokens[i].Line,
+				Lex.Tokens[i].Column,
+			)
+
+		} else {
+			fmt.printfln(
+				"%s (%d %d) %24s",
+				Lex.Tokens[i].Type,
+				Lex.Tokens[i].Line,
+				Lex.Tokens[i].Column,
+				Lex.Source[Lex.Tokens[i].IndexLow:Lex.Tokens[i].IndexHigh],
+			)
+		}
+	}
+}
+
+/*
+Grammar:
+
+S = Scene* | e
+Scene = _equal WordBlock SceneContent
+SceneContent = Line* | Branch*
+Line = _dash WordBlock
+Branch = _doubleDash ????
+WordBlock = Word* WordBlockEnd 
+Word = _word | _dash | _doubleDash | _equal 
+WordBlockEnd = _endOfLine Keyword | _endOfFile
+Keyword = _dash | _doubleDash | _equal
+*/
+
+
+PeekToken :: proc(ParserIn: ^Parser, Offset: u32 = 0) -> (Token, bool) {
+	tokenIndex := ParserIn.CurrentToken + Offset
+	if tokenIndex < ParserIn.Lex.TokenCount {
+		return ParserIn.Lex.Tokens[tokenIndex], true
+	}
+	return {}, false
+}
+
+
+Parse :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^YapFile) {
+
+}
+
+ParseScene :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGraph) -> bool {
+	return false
+}
+
+
+ParseSceneContent :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGraph) -> bool {
+	for {
+		ok, err, block := ParseLine(ParserIn)
+		if err != .None {
+			LogError(err, ParserIn.Lex, block, 0, 0)
+			return false
+		}
+		if !ok {
+			break
+		} else {
+
+		}
+
+		node: SceneNode
+	}
+	return false
+}
+
+ParseLine :: proc(ParserIn: ^Parser) -> (bool, ParseError, TextBlock) {
+	tok, ok := PeekToken(ParserIn)
+	if tok.Type == .Dash {
+		ParserIn.CurrentToken += 1
+		tok, ok = PeekToken(ParserIn)
+		if !ok {
+			return false, .NoWorldBlockAfterDash, {}
+		}
+		block: TextBlock
+		block.IndexLow = tok.IndexLow
+		worldBlockParsed := ParseWordBlock(ParserIn, &block)
+		if !worldBlockParsed {
+			return false, .NoWorldBlockAfterDash, {}
+		}
+		assert(block.IndexHigh > block.IndexLow)
+		return true, .None, block
+	}
+	return false, .None, {}
+}
+
+ParseWordBlock :: proc(ParserIn: ^Parser, Block: ^TextBlock) -> bool {
+	indexHigh, ok := ParseWord(ParserIn, 0)
+	if ok {
+		Block.IndexHigh = math.max(Block.IndexHigh, indexHigh)
+		if ParseWordBlockEnd(ParserIn) {
+			return true
+		}
+		ParserIn.CurrentToken += 1
+		return ParseWordBlock(ParserIn, Block)
+	}
+	return false
+}
+
+ParseWordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
+	tok, ok := PeekToken(ParserIn)
+	if ok {
+		if tok.Type == .EndOfFile {
+			ParserIn.CurrentToken += 1
+			return true
+		} else if tok.Type == .EndOfLine {
+			if ParseKeyWord(ParserIn, 1) {
+				ParserIn.CurrentToken += 2
+				return true
+			}
+		}
+	}
+	return false
+}
+
+ParseWord :: proc(ParserIn: ^Parser, TokenOffset: u32) -> (indexHigh: i32, success: bool) {
+	tok, ok := PeekToken(ParserIn, TokenOffset)
+
+	if ok {
+		return tok.IndexHigh,
+			(tok.Type == .Dash ||
+				tok.Type == .DoubleDash ||
+				tok.Type == .Equal ||
+				tok.Type == .Word)
+	}
+	return 0, false
+}
+
+ParseKeyWord :: proc(ParserIn: ^Parser, TokenOffset: u32) -> bool {
+	tok, ok := PeekToken(ParserIn, TokenOffset)
+	if ok {
+		return tok.Type == .Dash || tok.Type == .DoubleDash || tok.Type == .Equal
+
+	}
+	return false
+}
+
+LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Column: i32) {
+	message: string
+	switch Error {
+	case .None:
+	case .NoWorldBlockAfterDash:
+		message = "Expected text after -"
+	case .SceneWithNoLines:
+		message = "Scene with no lines"
+	}
+	if len(message) > 0 {
+		fmt.printfln(
+			"ERROR (%d, %d):%s\n%s",
+			Line,
+			Column,
+			message,
+			Lex.Source[Block.IndexLow:Block.IndexHigh],
+		)
+	}
 }
