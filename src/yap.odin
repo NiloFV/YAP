@@ -96,16 +96,16 @@ main :: proc() {
 	fileOutput: YapFile
 
 	Parse(&arena, &parser, &fileOutput)
-	
+
 
 	for i: u32 = 0; i < fileOutput.SceneCount; i += 1 {
 		PrintScene(&fileOutput.Scenes[i])
 		fmt.println("-----------------")
 	}
 
-	if parser.CurrentToken == lex.TokenCount{
+	if parser.CurrentToken == lex.TokenCount {
 		fmt.println("\nFile parsed with success!")
-	}else{
+	} else {
 		fmt.println("\nFailed to parse file")
 	}
 
@@ -228,10 +228,11 @@ Grammar:
 
 S = Scene* | e
 Scene = _equal WordBlock SceneContent
-SceneContent = Line* | Branch*
+SceneContent = Line* | BranchBlock*
 Line = _dash WordBlock
-Branch = _doubleDash WordBlock SceneContent BranchEnd
-BranchEnd = _endOfLine _doubleDash _endOfLine | _endOfLine _doubleDash _endOfFile
+BranchBlock = Branch* BranchBlockEnd
+Branch = _doubleDash WordBlock SceneContent 
+BranchBlockEnd = _endOfLine _doubleDash _endOfLine | _endOfLine _doubleDash _endOfFile
 WordBlock = Word* WordBlockEnd 
 Word = _word | _dash | _doubleDash | _equal 
 WordBlockEnd = _endOfLine Keyword | _endOfFile
@@ -374,6 +375,43 @@ ParseWordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
 	return false
 }
 
+/*
+BranchBlock = Branch* BranchBlockEnd
+Branch = _doubleDash WordBlock SceneContent 
+*/
+
+//NOT DONE
+ParseBranch :: proc(ParserIn: ^Parser) -> bool {
+	tok, ok := PeekToken(ParserIn)
+	if ok {
+		if tok.Type == .DoubleDash{
+			ParserIn.CurrentToken += 1
+			
+			block: TextBlock
+			block.IndexLow = tok.IndexHigh
+			if ParseWordBlock(ParserIn, &block) {
+
+			}
+		}
+	}
+	return false
+}
+
+ParseBranchEnd :: proc(ParserIn: ^Parser) -> bool {
+	tok1, ok1 := PeekToken(ParserIn)
+	tok2, ok2 := PeekToken(ParserIn, 1)
+	tok3, ok3 := PeekToken(ParserIn, 2)
+	if ok1 && ok2 && ok3 {
+		if tok1.Type == .EndOfLine &&
+		   tok2.Type == .DoubleDash &&
+		   (tok3.Type == .EndOfLine || tok3.Type == .EndOfFile) {
+			ParserIn.CurrentToken += 3
+			return true
+		}
+	}
+	return false
+}
+
 ParseWord :: proc(ParserIn: ^Parser, TokenOffset: u32) -> (indexHigh: i32, success: bool) {
 	tok, ok := PeekToken(ParserIn, TokenOffset)
 
@@ -420,7 +458,7 @@ LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Co
 
 PrintScene :: proc(Scene: ^SceneGraph) {
 	fmt.printfln("Scene: %s. %d nodes", Scene.SceneName, Scene.NodeCount)
-	for i: u32 = 0; i < Scene.NodeCount; i += 1 {		
+	for i: u32 = 0; i < Scene.NodeCount; i += 1 {
 		fmt.printfln("\n# %d: %s", i, Scene.Nodes[i].Content)
 		for t: u32 = 0; t < Scene.Nodes[i].TransitionCount; t += 1 {
 			fmt.printfln("  -> %d", Scene.Nodes[i].Transitions[t])
