@@ -96,10 +96,17 @@ main :: proc() {
 	fileOutput: YapFile
 
 	Parse(&arena, &parser, &fileOutput)
+	
 
 	for i: u32 = 0; i < fileOutput.SceneCount; i += 1 {
 		PrintScene(&fileOutput.Scenes[i])
 		fmt.println("-----------------")
+	}
+
+	if parser.CurrentToken == lex.TokenCount{
+		fmt.println("\nFile parsed with success!")
+	}else{
+		fmt.println("\nFailed to parse file")
 	}
 
 	fmt.println("\n... press RETURN to continue")
@@ -223,7 +230,8 @@ S = Scene* | e
 Scene = _equal WordBlock SceneContent
 SceneContent = Line* | Branch*
 Line = _dash WordBlock
-Branch = _doubleDash ????
+Branch = _doubleDash WordBlock SceneContent BranchEnd
+BranchEnd = _endOfLine _doubleDash _endOfLine | _endOfLine _doubleDash _endOfFile
 WordBlock = Word* WordBlockEnd 
 Word = _word | _dash | _doubleDash | _equal 
 WordBlockEnd = _endOfLine Keyword | _endOfFile
@@ -280,21 +288,28 @@ ParseScene :: proc(
 
 
 ParseSceneContent :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGraph) -> bool {
+	prevNode: ^SceneNode
+
 	for {
 		ok, err, block := ParseLine(ParserIn)
 		if err != .None {
 			LogError(err, ParserIn.Lex, block, 0, 0)
 			return false
 		}
-		if !ok {
-			return Out.NodeCount > 0
-		} else {
+		if ok {
 			node := PushStruct(Arena, SceneNode)
 			node.Content = string(ParserIn.Lex.Source[block.IndexLow:block.IndexHigh])
+			if prevNode != nil {
+				prevNode.Transitions[prevNode.TransitionCount] = Out.NodeCount
+				prevNode.TransitionCount += 1
+			}
 			Out.NodeCount += 1
 			if Out.Nodes == nil {
 				Out.Nodes = node
 			}
+			prevNode = node
+		} else {
+			return Out.NodeCount > 0
 		}
 	}
 	return false
@@ -405,7 +420,10 @@ LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Co
 
 PrintScene :: proc(Scene: ^SceneGraph) {
 	fmt.printfln("Scene: %s. %d nodes", Scene.SceneName, Scene.NodeCount)
-	for i: u32 = 0; i < Scene.NodeCount; i += 1 {
-		fmt.printfln("# %d: %s", i, Scene.Nodes[i].Content)
+	for i: u32 = 0; i < Scene.NodeCount; i += 1 {		
+		fmt.printfln("\n# %d: %s", i, Scene.Nodes[i].Content)
+		for t: u32 = 0; t < Scene.Nodes[i].TransitionCount; t += 1 {
+			fmt.printfln("  -> %d", Scene.Nodes[i].Transitions[t])
+		}
 	}
 }
