@@ -28,6 +28,7 @@ Lexer :: struct {
 	Source:     []u8,
 	Tokens:     [^]Token,
 	TokenCount: u32,
+	SceneCount: u32,
 }
 
 Parser :: struct {
@@ -39,6 +40,7 @@ ParseError :: enum {
 	None,
 	NoWorldBlockAfterDash,
 	SceneWithNoLines,
+	SceneWithNoName,
 }
 
 TextBlock :: struct {
@@ -48,16 +50,20 @@ TextBlock :: struct {
 
 
 SceneNode :: struct {
-	Content:     string,
-	Transitions: [^]u32,
+	Content:         string,
+	Transitions:     [16]u32,
+	TransitionCount: u32,
 }
 
 SceneGraph :: struct {
-	Nodes: [^]SceneNode,
+	SceneName: string,
+	Nodes:     [^]SceneNode,
+	NodeCount: u32,
 }
 
 YapFile :: struct {
-	Scenes: [^]SceneGraph,
+	Scenes:     [^]SceneGraph,
+	SceneCount: u32,
 }
 
 
@@ -85,7 +91,16 @@ main :: proc() {
 
 	parser: Parser
 	parser.Lex = &lex
+	parser.CurrentToken = 1
 
+	fileOutput: YapFile
+
+	Parse(&arena, &parser, &fileOutput)
+
+	for i: u32 = 0; i < fileOutput.SceneCount; i += 1 {
+		PrintScene(&fileOutput.Scenes[i])
+		fmt.println("-----------------")
+	}
 
 	fmt.println("\n... press RETURN to continue")
 	buf: [1]u8
@@ -114,7 +129,11 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 		case '=':
 			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
+			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
 			PushToken(Arena, Lex, .Equal, i, i + 1, line, column + 1)
+			if i == 0 || lastTok.Type == .EndOfLine {
+				Lex.SceneCount += 1
+			}
 		case '\n':
 			indexLow = i + 1
 			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
@@ -172,6 +191,9 @@ PushToken :: proc(
 }
 
 PrintLexer :: proc(Lex: ^Lexer) {
+
+	fmt.printfln("=================\nScene count: %d", Lex.SceneCount)
+
 	for i: u32 = 1; i < Lex.TokenCount; i += 1 {
 		if Lex.Tokens[i].Type == .EndOfLine || Lex.Tokens[i].Type == .EndOfFile {
 			fmt.printfln(
@@ -191,6 +213,7 @@ PrintLexer :: proc(Lex: ^Lexer) {
 			)
 		}
 	}
+	fmt.println("=================")
 }
 
 /*
@@ -218,11 +241,41 @@ PeekToken :: proc(ParserIn: ^Parser, Offset: u32 = 0) -> (Token, bool) {
 
 
 Parse :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^YapFile) {
+	Out.SceneCount = ParserIn.Lex.SceneCount
+	Out.Scenes = PushMultipointer(Arena, SceneGraph, Out.SceneCount)
 
+	for i: u32 = 0; i < Out.SceneCount; i += 1 {
+		ok, err := ParseScene(Arena, ParserIn, &Out.Scenes[i])
+		if !ok {
+			LogError(err, ParserIn.Lex, {}, 0, 0)
+			break
+		}
+	}
 }
 
-ParseScene :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGraph) -> bool {
-	return false
+ParseScene :: proc(
+	Arena: ^MemoryArena,
+	ParserIn: ^Parser,
+	OutScene: ^SceneGraph,
+) -> (
+	bool,
+	ParseError,
+) {
+	tok, ok := PeekToken(ParserIn)
+	if ok {
+		if tok.Type == .Equal {
+			ParserIn.CurrentToken += 1
+			block: TextBlock
+			block.IndexLow = tok.IndexHigh
+			if ParseWordBlock(ParserIn, &block) {
+				OutScene.SceneName = string(ParserIn.Lex.Source[block.IndexLow:block.IndexHigh])
+				return ParseSceneContent(Arena, ParserIn, OutScene), .None
+			} else {
+				return false, .SceneWithNoName
+			}
+		}
+	}
+	return false, .None
 }
 
 
@@ -234,12 +287,15 @@ ParseSceneContent :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGra
 			return false
 		}
 		if !ok {
-			break
+			return Out.NodeCount > 0
 		} else {
-
+			node := PushStruct(Arena, SceneNode)
+			node.Content = string(ParserIn.Lex.Source[block.IndexLow:block.IndexHigh])
+			Out.NodeCount += 1
+			if Out.Nodes == nil {
+				Out.Nodes = node
+			}
 		}
-
-		node: SceneNode
 	}
 	return false
 }
@@ -265,12 +321,22 @@ ParseLine :: proc(ParserIn: ^Parser) -> (bool, ParseError, TextBlock) {
 }
 
 ParseWordBlock :: proc(ParserIn: ^Parser, Block: ^TextBlock) -> bool {
+	if ParseWordBlockEnd(ParserIn) {
+		return true
+	}
+	tok, peekOk := PeekToken(ParserIn)
+	if !peekOk {
+		return false
+	}
+	if tok.Type == .EndOfLine {
+		Block.IndexHigh = math.max(Block.IndexHigh, tok.IndexHigh)
+		ParserIn.CurrentToken += 1
+		return ParseWordBlock(ParserIn, Block)
+	}
+
 	indexHigh, ok := ParseWord(ParserIn, 0)
 	if ok {
 		Block.IndexHigh = math.max(Block.IndexHigh, indexHigh)
-		if ParseWordBlockEnd(ParserIn) {
-			return true
-		}
 		ParserIn.CurrentToken += 1
 		return ParseWordBlock(ParserIn, Block)
 	}
@@ -285,7 +351,7 @@ ParseWordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
 			return true
 		} else if tok.Type == .EndOfLine {
 			if ParseKeyWord(ParserIn, 1) {
-				ParserIn.CurrentToken += 2
+				ParserIn.CurrentToken += 1
 				return true
 			}
 		}
@@ -323,6 +389,8 @@ LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Co
 		message = "Expected text after -"
 	case .SceneWithNoLines:
 		message = "Scene with no lines"
+	case .SceneWithNoName:
+		message = "Expected scene name after ="
 	}
 	if len(message) > 0 {
 		fmt.printfln(
@@ -332,5 +400,12 @@ LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Co
 			message,
 			Lex.Source[Block.IndexLow:Block.IndexHigh],
 		)
+	}
+}
+
+PrintScene :: proc(Scene: ^SceneGraph) {
+	fmt.printfln("Scene: %s. %d nodes", Scene.SceneName, Scene.NodeCount)
+	for i: u32 = 0; i < Scene.NodeCount; i += 1 {
+		fmt.printfln("# %d: %s", i, Scene.Nodes[i].Content)
 	}
 }

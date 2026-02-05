@@ -9,3 +9,15 @@ Sheeesh!
 -Well, I'll open a chest for you. = Will you keep it secret from everyone else?
 
 -Would you please promise?
+
+=My second scene-
+-All right! Take it, thief!
+
+-Whoa... I saw her.
+A very nice young lady at the
+Waterfall Of Wishing in the
+hills where the river begins...
+
+-Link, you should meet her
+at least once. I'm sure you will
+like her.
