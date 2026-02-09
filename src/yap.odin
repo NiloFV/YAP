@@ -6,8 +6,9 @@ import "core:os"
 
 
 PRE_ALOCATED_MEM_MB :: 256
+I32_MAX :: 2147483647
 
-TokenType :: enum {
+Terminal :: enum {
 	Unkown,
 	Dash,
 	DoubleDash,
@@ -17,8 +18,22 @@ TokenType :: enum {
 	EndOfFile,
 }
 
+NonTerminal :: enum {
+	Start,
+	Scene,
+	WordBlock,
+	Word,
+	WordBlockEnd,
+	Keyword,
+	SceneContent,
+	Line,
+	BranchBlock,
+	Branch,
+	BranchBlockEnd,
+}
+
 Token :: struct {
-	Type:        TokenType,
+	Type:        Terminal,
 	using Block: TextBlock,
 	Line:        i32,
 	Column:      i32,
@@ -31,40 +46,52 @@ Lexer :: struct {
 	SceneCount: u32,
 }
 
+
 Parser :: struct {
-	Lex:          ^Lexer,
-	CurrentToken: u32,
+	Lex:        ^Lexer,
+	Arena:      ^MemoryArena,
+	TokenIndex: u32,
 }
 
-ParseError :: enum {
+ParseErrorType :: enum {
 	None,
+	NoSceneFound,
 	NoWorldBlockAfterDash,
 	SceneWithNoLines,
 	SceneWithNoName,
 }
+ParserError :: struct {
+	Error:         ParseErrorType,
+	IndexOnSource: i32,
+	Line:          i32,
+	Column:        i32,
+}
+
 
 TextBlock :: struct {
 	IndexLow:  i32,
 	IndexHigh: i32,
 }
 
+TreeNode :: struct {
+	Children:      [^]^TreeNode,
+	ChildrenCount: u32,
+	Value:         TreeNodeContent,
+}
 
-SceneNode :: struct {
+TreeNodeContent :: union {
+	SceneNodeData,
+	NonTerminal,
+	ParserError,
+}
+
+SceneNodeData :: struct {
 	Content:         string,
 	Transitions:     [16]u32,
 	TransitionCount: u32,
 }
 
-SceneGraph :: struct {
-	SceneName: string,
-	Nodes:     [^]SceneNode,
-	NodeCount: u32,
-}
 
-YapFile :: struct {
-	Scenes:     [^]SceneGraph,
-	SceneCount: u32,
-}
 
 
 main :: proc() {
@@ -89,21 +116,13 @@ main :: proc() {
 
 	PrintLexer(&lex)
 
-	parser: Parser
-	parser.Lex = &lex
-	parser.CurrentToken = 1
+	parser: Parser = CreateParser(&lex, &arena)
 
-	fileOutput: YapFile
+	root := Parse(&parser)
 
-	Parse(&arena, &parser, &fileOutput)
+	PrintParseTree(root, &lex)
 
-
-	for i: u32 = 0; i < fileOutput.SceneCount; i += 1 {
-		PrintScene(&fileOutput.Scenes[i])
-		fmt.println("-----------------")
-	}
-
-	if parser.CurrentToken == lex.TokenCount {
+	if parser.TokenIndex == lex.TokenCount {
 		fmt.println("\nFile parsed with success!")
 	} else {
 		fmt.println("\nFailed to parse file")
@@ -112,6 +131,16 @@ main :: proc() {
 	fmt.println("\n... press RETURN to continue")
 	buf: [1]u8
 	n, err := os.read(os.stdin, buf[:])
+}
+
+
+CreateParser :: proc(Lex: ^Lexer, Arena: ^MemoryArena) -> Parser {
+	parser: Parser
+	parser.Lex = Lex
+	parser.Arena = Arena
+	parser.TokenIndex = 1
+
+	return parser
 }
 
 Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
@@ -168,7 +197,7 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 TryFlushWordToken :: proc(
 	Arena: ^MemoryArena,
 	Lex: ^Lexer,
-	Tok: TokenType,
+	Tok: Terminal,
 	#any_int ContentLow: i32,
 	#any_int ContentHigh: i32,
 	#any_int Line: i32,
@@ -182,7 +211,7 @@ TryFlushWordToken :: proc(
 PushToken :: proc(
 	Arena: ^MemoryArena,
 	Lex: ^Lexer,
-	Tok: TokenType,
+	Tok: Terminal,
 	#any_int ContentLow: i32,
 	#any_int ContentHigh: i32,
 	#any_int Line: i32,
@@ -223,220 +252,9 @@ PrintLexer :: proc(Lex: ^Lexer) {
 	fmt.println("=================")
 }
 
-/*
-Grammar:
-
-S = Scene* | e
-Scene = _equal WordBlock SceneContent
-SceneContent = Line* | BranchBlock*
-Line = _dash WordBlock
-BranchBlock = Branch* BranchBlockEnd
-Branch = _doubleDash WordBlock SceneContent 
-BranchBlockEnd = _endOfLine _doubleDash _endOfLine | _endOfLine _doubleDash _endOfFile
-WordBlock = Word* WordBlockEnd 
-Word = _word | _dash | _doubleDash | _equal 
-WordBlockEnd = _endOfLine Keyword | _endOfFile
-Keyword = _dash | _doubleDash | _equal
-*/
-
-
-PeekToken :: proc(ParserIn: ^Parser, Offset: u32 = 0) -> (Token, bool) {
-	tokenIndex := ParserIn.CurrentToken + Offset
-	if tokenIndex < ParserIn.Lex.TokenCount {
-		return ParserIn.Lex.Tokens[tokenIndex], true
-	}
-	return {}, false
-}
-
-
-Parse :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^YapFile) {
-	Out.SceneCount = ParserIn.Lex.SceneCount
-	Out.Scenes = PushMultipointer(Arena, SceneGraph, Out.SceneCount)
-
-	for i: u32 = 0; i < Out.SceneCount; i += 1 {
-		ok, err := ParseScene(Arena, ParserIn, &Out.Scenes[i])
-		if !ok {
-			LogError(err, ParserIn.Lex, {}, 0, 0)
-			break
-		}
-	}
-}
-
-ParseScene :: proc(
-	Arena: ^MemoryArena,
-	ParserIn: ^Parser,
-	OutScene: ^SceneGraph,
-) -> (
-	bool,
-	ParseError,
-) {
-	tok, ok := PeekToken(ParserIn)
-	if ok {
-		if tok.Type == .Equal {
-			ParserIn.CurrentToken += 1
-			block: TextBlock
-			block.IndexLow = tok.IndexHigh
-			if ParseWordBlock(ParserIn, &block) {
-				OutScene.SceneName = string(ParserIn.Lex.Source[block.IndexLow:block.IndexHigh])
-				return ParseSceneContent(Arena, ParserIn, OutScene), .None
-			} else {
-				return false, .SceneWithNoName
-			}
-		}
-	}
-	return false, .None
-}
-
-
-ParseSceneContent :: proc(Arena: ^MemoryArena, ParserIn: ^Parser, Out: ^SceneGraph) -> bool {
-	prevNode: ^SceneNode
-
-	for {
-		ok, err, block := ParseLine(ParserIn)
-		if err != .None {
-			LogError(err, ParserIn.Lex, block, 0, 0)
-			return false
-		}
-		if ok {
-			node := PushStruct(Arena, SceneNode)
-			node.Content = string(ParserIn.Lex.Source[block.IndexLow:block.IndexHigh])
-			if prevNode != nil {
-				prevNode.Transitions[prevNode.TransitionCount] = Out.NodeCount
-				prevNode.TransitionCount += 1
-			}
-			Out.NodeCount += 1
-			if Out.Nodes == nil {
-				Out.Nodes = node
-			}
-			prevNode = node
-		} else {
-			return Out.NodeCount > 0
-		}
-	}
-	return false
-}
-
-ParseLine :: proc(ParserIn: ^Parser) -> (bool, ParseError, TextBlock) {
-	tok, ok := PeekToken(ParserIn)
-	if tok.Type == .Dash {
-		ParserIn.CurrentToken += 1
-		tok, ok = PeekToken(ParserIn)
-		if !ok {
-			return false, .NoWorldBlockAfterDash, {}
-		}
-		block: TextBlock
-		block.IndexLow = tok.IndexLow
-		worldBlockParsed := ParseWordBlock(ParserIn, &block)
-		if !worldBlockParsed {
-			return false, .NoWorldBlockAfterDash, {}
-		}
-		assert(block.IndexHigh > block.IndexLow)
-		return true, .None, block
-	}
-	return false, .None, {}
-}
-
-ParseWordBlock :: proc(ParserIn: ^Parser, Block: ^TextBlock) -> bool {
-	if ParseWordBlockEnd(ParserIn) {
-		return true
-	}
-	tok, peekOk := PeekToken(ParserIn)
-	if !peekOk {
-		return false
-	}
-	if tok.Type == .EndOfLine {
-		Block.IndexHigh = math.max(Block.IndexHigh, tok.IndexHigh)
-		ParserIn.CurrentToken += 1
-		return ParseWordBlock(ParserIn, Block)
-	}
-
-	indexHigh, ok := ParseWord(ParserIn, 0)
-	if ok {
-		Block.IndexHigh = math.max(Block.IndexHigh, indexHigh)
-		ParserIn.CurrentToken += 1
-		return ParseWordBlock(ParserIn, Block)
-	}
-	return false
-}
-
-ParseWordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
-	tok, ok := PeekToken(ParserIn)
-	if ok {
-		if tok.Type == .EndOfFile {
-			ParserIn.CurrentToken += 1
-			return true
-		} else if tok.Type == .EndOfLine {
-			if ParseKeyWord(ParserIn, 1) {
-				ParserIn.CurrentToken += 1
-				return true
-			}
-		}
-	}
-	return false
-}
-
-/*
-BranchBlock = Branch* BranchBlockEnd
-Branch = _doubleDash WordBlock SceneContent 
-*/
-
-//NOT DONE
-ParseBranch :: proc(ParserIn: ^Parser) -> bool {
-	tok, ok := PeekToken(ParserIn)
-	if ok {
-		if tok.Type == .DoubleDash{
-			ParserIn.CurrentToken += 1
-			
-			block: TextBlock
-			block.IndexLow = tok.IndexHigh
-			if ParseWordBlock(ParserIn, &block) {
-
-			}
-		}
-	}
-	return false
-}
-
-ParseBranchEnd :: proc(ParserIn: ^Parser) -> bool {
-	tok1, ok1 := PeekToken(ParserIn)
-	tok2, ok2 := PeekToken(ParserIn, 1)
-	tok3, ok3 := PeekToken(ParserIn, 2)
-	if ok1 && ok2 && ok3 {
-		if tok1.Type == .EndOfLine &&
-		   tok2.Type == .DoubleDash &&
-		   (tok3.Type == .EndOfLine || tok3.Type == .EndOfFile) {
-			ParserIn.CurrentToken += 3
-			return true
-		}
-	}
-	return false
-}
-
-ParseWord :: proc(ParserIn: ^Parser, TokenOffset: u32) -> (indexHigh: i32, success: bool) {
-	tok, ok := PeekToken(ParserIn, TokenOffset)
-
-	if ok {
-		return tok.IndexHigh,
-			(tok.Type == .Dash ||
-				tok.Type == .DoubleDash ||
-				tok.Type == .Equal ||
-				tok.Type == .Word)
-	}
-	return 0, false
-}
-
-ParseKeyWord :: proc(ParserIn: ^Parser, TokenOffset: u32) -> bool {
-	tok, ok := PeekToken(ParserIn, TokenOffset)
-	if ok {
-		return tok.Type == .Dash || tok.Type == .DoubleDash || tok.Type == .Equal
-
-	}
-	return false
-}
-
-LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Column: i32) {
+LogError :: proc(Error: ParserError, Lex: ^Lexer) {
 	message: string
-	switch Error {
+	switch Error.Error {
 	case .None:
 	case .NoWorldBlockAfterDash:
 		message = "Expected text after -"
@@ -444,24 +262,224 @@ LogError :: proc(Error: ParseError, Lex: ^Lexer, Block: TextBlock, Line: i32, Co
 		message = "Scene with no lines"
 	case .SceneWithNoName:
 		message = "Expected scene name after ="
+	case .NoSceneFound:
+		message = "Expected ="
 	}
 	if len(message) > 0 {
 		fmt.printfln(
 			"ERROR (%d, %d):%s\n%s",
-			Line,
-			Column,
+			Error.Line,
+			Error.Column,
 			message,
-			Lex.Source[Block.IndexLow:Block.IndexHigh],
+			Lex.Source[Error.IndexOnSource:Error.IndexOnSource + 4], //temp
 		)
 	}
 }
 
-PrintScene :: proc(Scene: ^SceneGraph) {
-	fmt.printfln("Scene: %s. %d nodes", Scene.SceneName, Scene.NodeCount)
-	for i: u32 = 0; i < Scene.NodeCount; i += 1 {
-		fmt.printfln("\n# %d: %s", i, Scene.Nodes[i].Content)
-		for t: u32 = 0; t < Scene.Nodes[i].TransitionCount; t += 1 {
-			fmt.printfln("  -> %d", Scene.Nodes[i].Transitions[t])
+
+/*
+Grammar:
+
+S = Scene*
+Scene = _equal WordBlock SceneContent
+SceneContent = Line*
+Line = _dash WordBlock
+WordBlock =  Word* WordBlockEnd
+Word = _word | _dash | _doubleDash | _equal 
+WordBlockEnd = _endOfLine Keyword | _endOfFile
+Keyword = _dash | _doubleDash | _equal
+*/
+
+PeekToken :: proc(ParserIn: ^Parser, Offset: u32 = 0) -> (Token, bool) {
+	tokenIndex := ParserIn.TokenIndex + Offset
+	if tokenIndex < ParserIn.Lex.TokenCount {
+		return ParserIn.Lex.Tokens[tokenIndex], true
+	}
+	return {}, false
+}
+MatchToken :: proc(ParserIn: ^Parser, TokenType: Terminal) -> (Token, bool) {
+	tk, ok := PeekToken(ParserIn)
+	if ok && tk.Type == TokenType {
+		ParserIn.TokenIndex += 1
+		return tk, true
+	}
+	return {}, false
+}
+
+CreateTreeNode :: proc(Arena: ^MemoryArena) -> ^TreeNode {
+	node := PushStruct(Arena, TreeNode)
+	node.Children = nil
+	node.ChildrenCount = 0
+	return node
+}
+
+Parse :: proc(ParserIn: ^Parser) -> ^TreeNode {
+	return Start(ParserIn)
+}
+
+Start :: proc(ParserIn: ^Parser) -> ^TreeNode {
+	root: ^TreeNode = PushStruct(ParserIn.Arena, TreeNode)
+	root.Children = PushMultipointer(ParserIn.Arena, ^TreeNode, ParserIn.Lex.SceneCount)
+	root.ChildrenCount = ParserIn.Lex.SceneCount
+	root.Value = .Start
+
+	for i: u32 = 0; i < ParserIn.Lex.SceneCount; i += 1 {
+		tk, ok := PeekToken(ParserIn)
+		if ok && tk.Type == .Equal {
+			root.Children[i] = Scene(ParserIn)
+		} else {
+			errorNode := CreateTreeNode(ParserIn.Arena)
+			errorNode.Value = ParserError {
+				Error         = .NoSceneFound,
+				Column        = tk.Column,
+				Line          = tk.Line,
+				IndexOnSource = tk.IndexHigh,
+			}
+			root.Children[i] = errorNode
 		}
+	}
+	return root
+}
+
+Scene :: proc(ParserIn: ^Parser) -> ^TreeNode {
+	tk, ok := MatchToken(ParserIn, .Equal)
+	assert(ok)
+	sceneNameBlock := WordBlock(ParserIn)
+	if sceneNameBlock.IndexLow >= sceneNameBlock.IndexHigh {
+		errNode := CreateTreeNode(ParserIn.Arena)
+		errNode.Value = ParserError {
+			Error         = .SceneWithNoName,
+			Column        = tk.Column,
+			Line          = tk.Line,
+			IndexOnSource = tk.IndexHigh,
+		}
+		return errNode
+	}
+	sceneNode := CreateTreeNode(ParserIn.Arena)
+	sceneNode.Value = SceneNodeData {
+		Content = string(ParserIn.Lex.Source[sceneNameBlock.IndexLow:sceneNameBlock.IndexHigh]),
+	}
+	SceneContent(ParserIn, sceneNode)
+	return sceneNode
+}
+
+SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
+	nodes: [^]TreeNode
+
+	for {
+		tk, ok := PeekToken(ParserIn)
+		if ok && tk.Type == .Dash {
+			node := CreateTreeNode(ParserIn.Arena)
+			SceneRoot.ChildrenCount += 1
+
+			if nodes == nil {
+				nodes = node
+			}
+
+			lineBlock := Line(ParserIn)
+			if lineBlock.IndexLow >= lineBlock.IndexHigh {
+				node.Value = ParserError {
+					Error         = .NoWorldBlockAfterDash,
+					Column        = tk.Column,
+					Line          = tk.Line,
+					IndexOnSource = tk.IndexHigh,
+				}
+			} else {
+				node.Value = SceneNodeData {
+					Content = string(ParserIn.Lex.Source[lineBlock.IndexLow:lineBlock.IndexHigh]),
+				}
+			}
+		} else {
+			break
+		}
+	}
+
+	SceneRoot.Children = PushMultipointer(ParserIn.Arena, ^TreeNode, SceneRoot.ChildrenCount)
+	for i :u32= 0; i < SceneRoot.ChildrenCount; i += 1 {
+		SceneRoot.Children[i] = &nodes[i]		
+	}
+}
+
+Line :: proc(ParserIn: ^Parser) -> TextBlock {
+	tk, ok := MatchToken(ParserIn, .Dash)
+	assert(ok)
+	return WordBlock(ParserIn)
+}
+
+WordBlock :: proc(ParserIn: ^Parser) -> TextBlock {
+	block: TextBlock
+	block.IndexLow = I32_MAX
+	block.IndexHigh = 0
+	for {
+		if WordBlockEnd(ParserIn) {
+			break
+		}
+
+		tok, ok := MatchToken(ParserIn, .EndOfLine)
+		if ok {
+			continue
+		}
+
+		word := Word(ParserIn)
+		if word.Type != .Unkown {
+			block.IndexLow = math.min(block.IndexLow, word.IndexLow)
+			block.IndexHigh = math.max(block.IndexHigh, word.IndexHigh)
+		}
+	}
+	return block
+}
+
+Word :: proc(ParserIn: ^Parser) -> Token {
+	tk, ok := PeekToken(ParserIn)
+	if ok {
+		if tk.Type == .Word || tk.Type == .Dash || tk.Type == .DoubleDash || tk.Type == .Equal {
+			ParserIn.TokenIndex += 1
+			return tk
+		}
+	}
+	return {}
+}
+
+WordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
+	next, ok := PeekToken(ParserIn)
+	if ok {
+		if next.Type == .EndOfLine {
+			ParserIn.TokenIndex += 1
+			if Keyword(ParserIn) {
+				return true
+			} else {
+				ParserIn.TokenIndex -= 1
+			}
+		} else {
+			_, ok := MatchToken(ParserIn, .EndOfFile)
+			return ok
+		}
+	}
+
+	return false
+}
+
+Keyword :: proc(ParserIn: ^Parser) -> bool {
+	tok, ok := PeekToken(ParserIn)
+	if ok {
+		return tok.Type == .Dash || tok.Type == .DoubleDash || tok.Type == .Equal
+	}
+	return false
+}
+
+
+PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
+
+	switch node in Root.Value {
+	case SceneNodeData:
+		fmt.printfln("( %s )",node.Content)
+	case NonTerminal:
+		fmt.printfln("( %s )", node)		
+	case ParserError:
+		LogError(node, Lex)
+	}
+
+	for i: u32 = 0; i < Root.ChildrenCount; i += 1 {
+		PrintParseTree(Root.Children[i], Lex)
 	}
 }
