@@ -3,6 +3,7 @@ package src
 import "core:fmt"
 import "core:math"
 import "core:os"
+import win32 "core:sys/windows"
 
 
 PRE_ALOCATED_MEM_MB :: 256
@@ -98,6 +99,8 @@ YapOutputFlags :: bit_set[YapOutputFlag]
 
 CompileSettings :: struct {
 	OutputFlags: YapOutputFlags,
+	Verbose:     b16,
+	DebugLexer:  b16,
 	Path:        string,
 	FileName:    string,
 }
@@ -135,6 +138,8 @@ main :: proc() {
 	settings.OutputFlags = {.Binary}
 	settings.Path = FilterPath(filePath)
 	settings.FileName = FilterFileName_NoExtension(filePath)
+	settings.Verbose = true
+	settings.DebugLexer = false
 	Compile(text, settings)
 
 	fmt.println("\n... press RETURN to continue")
@@ -151,13 +156,21 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 		ClearArena(&Arena)
 	}
 
+	perfCountFrequencyResult: win32.LARGE_INTEGER
+	win32.QueryPerformanceFrequency(&perfCountFrequencyResult)
+	perfCountFrequency: i64 = cast(i64)perfCountFrequencyResult
+	counterStart: win32.LARGE_INTEGER
+	win32.QueryPerformanceCounter(&counterStart)
+
 	lex: Lexer
 	lex.Source = Source
 	lex.Tokens = PushMultipointer(&Arena, Token, 1, 0)
 	lex.TokenCount = 1
 	Tokenize(&Arena, &lex)
 
-	//PrintLexer(&lex)
+	if Settings.DebugLexer {
+		PrintLexer(&lex)
+	}
 
 	parser: Parser = CreateParser(&lex, &Arena)
 
@@ -166,7 +179,6 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 	ParsePostProcess(root, &lex, &hasParsingErrors)
 
 	if parser.TokenIndex == lex.TokenCount && !hasParsingErrors {
-		fmt.println("\nFile parsed with success!")
 
 		if YapOutputFlag.Binary in Settings.OutputFlags {
 			buf: [1024]byte
@@ -175,11 +187,23 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 			if err == nil {
 				WriteYapFile(&parser, root, &fileHandle)
 				os.close(fileHandle)
-				fmt.printfln("\nScript exported to: %s", outputPath)
+				fmt.printfln("\n=== Script exported to: %s ===", outputPath)
 			}
 		}
+
+		if Settings.Verbose {
+			counterEnd: win32.LARGE_INTEGER
+			win32.QueryPerformanceCounter(&counterEnd)
+			elapsedSeconds: f32 =
+				(cast(f32)(counterEnd - counterStart)) / (cast(f32)perfCountFrequency)
+
+			fmt.printfln(">> Version: %d", YAP_VERSION)
+			fmt.printfln(">> Time elapsed: %f(s)", elapsedSeconds)
+		}
+		fmt.printfln("\n=== File parsed with success ===")
+
 	} else {
-		fmt.println("\nFailed to parse file")
+		fmt.println("\n=== Failed to parse file ===")
 	}
 }
 
@@ -587,8 +611,8 @@ WriteYapFileRecursive :: proc(
 			_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
 			assert(writeErr == nil, "Failed to write scene header")
 		} else {
-			line : YapFileLine
-			
+			line: YapFileLine
+
 			line.Content = node.Content
 			line.ContentLenght = i32(len(node.Content))
 			line.TransitionCount = 1
@@ -603,6 +627,6 @@ WriteYapFileRecursive :: proc(
 	}
 
 	for i: i32 = 0; i < i32(Root.ChildrenCount); i += 1 {
-		WriteYapFileRecursive(ParserIn, Root.Children[i], FileHandle, NodeIndex)		
+		WriteYapFileRecursive(ParserIn, Root.Children[i], FileHandle, NodeIndex)
 	}
 }
