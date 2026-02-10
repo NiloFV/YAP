@@ -42,15 +42,14 @@ Token :: struct {
 Lexer :: struct {
 	Source:     []u8,
 	Tokens:     [^]Token,
-	TokenCount: u32,
-	SceneCount: u32,
+	TokenCount: i32,
+	SceneCount: i32,
 }
-
 
 Parser :: struct {
 	Lex:        ^Lexer,
 	Arena:      ^MemoryArena,
-	TokenIndex: u32,
+	TokenIndex: i32,
 }
 
 ParseErrorType :: enum {
@@ -60,6 +59,7 @@ ParseErrorType :: enum {
 	SceneWithNoLines,
 	SceneWithNoName,
 }
+
 ParserError :: struct {
 	Error:         ParseErrorType,
 	IndexOnSource: i32,
@@ -75,7 +75,7 @@ TextBlock :: struct {
 
 TreeNode :: struct {
 	Children:      [^]^TreeNode,
-	ChildrenCount: u32,
+	ChildrenCount: i32,
 	Value:         TreeNodeContent,
 }
 
@@ -86,51 +86,101 @@ TreeNodeContent :: union {
 }
 
 SceneNodeData :: struct {
-	Content:         string,
-	Transitions:     [16]u32,
-	TransitionCount: u32,
+	Content: string,
 }
 
+YapOutputFlag :: enum {
+	None,
+	Binary,
+	Csv,
+}
+YapOutputFlags :: bit_set[YapOutputFlag]
 
+CompileSettings :: struct {
+	OutputFlags: YapOutputFlags,
+	Path:        string,
+	FileName:    string,
+}
 
+YAP_VERSION :: 1
+YapCode := FileHeaderCode('Y', 'A', 'P', 'F')
+
+YapFileHeader :: struct #packed {
+	MagicValue: u32,
+	Version:    i32,
+	SceneCount: i32,
+}
+YapFileScene :: struct #packed {
+	SceneNameLenght: i32,
+	ChildCount:      i32,
+	SceneName:       string,
+}
+YapFileLine :: struct #packed {
+	ContentLenght:   i32,
+	TransitionCount: i32,
+	Content:         string,
+	Transitions:     []i32,
+}
+
+Arena: MemoryArena
 
 main :: proc() {
 
 	filePath := os.args[1]
-	fmt.printfln(">Reading %s", filePath)
 
 	text, ok := os.read_entire_file(filePath)
 	assert(ok, "Failed to read file")
 
-	fmt.println(">File read with success")
-
-	mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
-	arena: MemoryArena
-	InitializeArena(&arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
-
-	lex: Lexer
-	lex.Source = text
-	lex.Tokens = PushMultipointer(&arena, Token, 1, 0)
-	lex.TokenCount = 1
-	Tokenize(&arena, &lex)
-
-	PrintLexer(&lex)
-
-	parser: Parser = CreateParser(&lex, &arena)
-
-	root := Parse(&parser)
-
-	PrintParseTree(root, &lex)
-
-	if parser.TokenIndex == lex.TokenCount {
-		fmt.println("\nFile parsed with success!")
-	} else {
-		fmt.println("\nFailed to parse file")
-	}
+	settings: CompileSettings
+	settings.OutputFlags = {.Binary}
+	settings.Path = FilterPath(filePath)
+	settings.FileName = FilterFileName_NoExtension(filePath)
+	Compile(text, settings)
 
 	fmt.println("\n... press RETURN to continue")
 	buf: [1]u8
 	n, err := os.read(os.stdin, buf[:])
+}
+
+Compile :: proc(Source: []u8, Settings: CompileSettings) {
+	mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
+
+	if Arena.Size == 0 {
+		InitializeArena(&Arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
+	} else {
+		ClearArena(&Arena)
+	}
+
+	lex: Lexer
+	lex.Source = Source
+	lex.Tokens = PushMultipointer(&Arena, Token, 1, 0)
+	lex.TokenCount = 1
+	Tokenize(&Arena, &lex)
+
+	//PrintLexer(&lex)
+
+	parser: Parser = CreateParser(&lex, &Arena)
+
+	root := Parse(&parser)
+	hasParsingErrors: bool
+	ParsePostProcess(root, &lex, &hasParsingErrors)
+
+	if parser.TokenIndex == lex.TokenCount && !hasParsingErrors {
+		fmt.println("\nFile parsed with success!")
+
+		if YapOutputFlag.Binary in Settings.OutputFlags {
+			buf: [1024]byte
+			outputPath := fmt.bprintf(buf[:], "%s%s.yapb", Settings.Path, Settings.FileName)
+			fileHandle, err := os.open(outputPath, os.O_CREATE | os.O_TRUNC | os.O_WRONLY)
+			if err == nil {
+				WriteYapFile(&parser, root, &fileHandle)
+				os.close(fileHandle)
+				fmt.printfln("\nScript exported to: %s", outputPath)
+			}
+		}
+	} else {
+		fmt.println("\nFailed to parse file")
+	}
 }
 
 
@@ -230,7 +280,7 @@ PrintLexer :: proc(Lex: ^Lexer) {
 
 	fmt.printfln("=================\nScene count: %d", Lex.SceneCount)
 
-	for i: u32 = 1; i < Lex.TokenCount; i += 1 {
+	for i: i32 = 1; i < Lex.TokenCount; i += 1 {
 		if Lex.Tokens[i].Type == .EndOfLine || Lex.Tokens[i].Type == .EndOfFile {
 			fmt.printfln(
 				"%s (%d %d)",
@@ -290,7 +340,7 @@ WordBlockEnd = _endOfLine Keyword | _endOfFile
 Keyword = _dash | _doubleDash | _equal
 */
 
-PeekToken :: proc(ParserIn: ^Parser, Offset: u32 = 0) -> (Token, bool) {
+PeekToken :: proc(ParserIn: ^Parser, Offset: i32 = 0) -> (Token, bool) {
 	tokenIndex := ParserIn.TokenIndex + Offset
 	if tokenIndex < ParserIn.Lex.TokenCount {
 		return ParserIn.Lex.Tokens[tokenIndex], true
@@ -323,7 +373,7 @@ Start :: proc(ParserIn: ^Parser) -> ^TreeNode {
 	root.ChildrenCount = ParserIn.Lex.SceneCount
 	root.Value = .Start
 
-	for i: u32 = 0; i < ParserIn.Lex.SceneCount; i += 1 {
+	for i: i32 = 0; i < ParserIn.Lex.SceneCount; i += 1 {
 		tk, ok := PeekToken(ParserIn)
 		if ok && tk.Type == .Equal {
 			root.Children[i] = Scene(ParserIn)
@@ -395,8 +445,8 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 	}
 
 	SceneRoot.Children = PushMultipointer(ParserIn.Arena, ^TreeNode, SceneRoot.ChildrenCount)
-	for i :u32= 0; i < SceneRoot.ChildrenCount; i += 1 {
-		SceneRoot.Children[i] = &nodes[i]		
+	for i: i32 = 0; i < SceneRoot.ChildrenCount; i += 1 {
+		SceneRoot.Children[i] = &nodes[i]
 	}
 }
 
@@ -467,19 +517,92 @@ Keyword :: proc(ParserIn: ^Parser) -> bool {
 	return false
 }
 
+ParsePostProcess :: proc(Root: ^TreeNode, Lex: ^Lexer, Err: ^bool) {
+
+	switch &node in Root.Value {
+	case SceneNodeData:
+	case NonTerminal:
+	case ParserError:
+		LogError(node, Lex)
+		Err^ = true
+	}
+
+	for i: i32 = 0; i < i32(Root.ChildrenCount); i += 1 {
+		ParsePostProcess(Root.Children[i], Lex, Err)
+	}
+}
 
 PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 
 	switch node in Root.Value {
 	case SceneNodeData:
-		fmt.printfln("( %s )",node.Content)
+		isSceneRoot := Root.ChildrenCount > 0
+		fmt.printfln("%s( %s )", isSceneRoot ? "\nscene" : "line", node.Content)
 	case NonTerminal:
-		fmt.printfln("( %s )", node)		
+		fmt.printfln("\n( %s )", node)
 	case ParserError:
 		LogError(node, Lex)
 	}
 
-	for i: u32 = 0; i < Root.ChildrenCount; i += 1 {
+	for i: i32 = 0; i < Root.ChildrenCount; i += 1 {
 		PrintParseTree(Root.Children[i], Lex)
+	}
+}
+
+
+FileHeaderCode :: #force_inline proc(a: rune, b: rune, c: rune, d: rune) -> u32 {
+	return (cast(u32)a << 0) | (cast(u32)b << 8) | (cast(u32)c << 16) | (cast(u32)d << 24)
+}
+
+WriteYapFile :: proc(ParserIn: ^Parser, Root: ^TreeNode, FileHandle: ^os.Handle) {
+	header: YapFileHeader
+	header.MagicValue = YapCode
+	header.Version = YAP_VERSION
+	header.SceneCount = ParserIn.Lex.SceneCount
+
+	writeErr: os.Error = nil
+	_, writeErr = os.write_ptr(FileHandle^, &header, size_of(header))
+	assert(writeErr == nil, "Failed to write header")
+
+	nodeIndex: i32 = 0
+	WriteYapFileRecursive(ParserIn, Root, FileHandle, &nodeIndex)
+}
+
+WriteYapFileRecursive :: proc(
+	ParserIn: ^Parser,
+	Root: ^TreeNode,
+	FileHandle: ^os.Handle,
+	NodeIndex: ^i32,
+) {
+	switch &node in Root.Value {
+	case SceneNodeData:
+		if Root.ChildrenCount > 0 {
+			NodeIndex^ = 0
+
+			scene: YapFileScene
+			scene.SceneNameLenght = i32(len(node.Content))
+			scene.ChildCount = Root.ChildrenCount
+			scene.SceneName = node.Content
+
+			_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
+			assert(writeErr == nil, "Failed to write scene header")
+		} else {
+			line : YapFileLine
+			
+			line.Content = node.Content
+			line.ContentLenght = i32(len(node.Content))
+			line.TransitionCount = 1
+			line.Transitions = {NodeIndex^ + 1}
+			NodeIndex^ += 1
+
+			_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
+			assert(writeErr == nil, "Failed to write line")
+		}
+	case NonTerminal:
+	case ParserError:
+	}
+
+	for i: i32 = 0; i < i32(Root.ChildrenCount); i += 1 {
+		WriteYapFileRecursive(ParserIn, Root.Children[i], FileHandle, NodeIndex)		
 	}
 }
