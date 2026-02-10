@@ -116,12 +116,10 @@ YapFileHeader :: struct #packed {
 YapFileScene :: struct #packed {
 	SceneNameLenght: i32,
 	ChildCount:      i32,
-	SceneName:       string,
 }
 YapFileLine :: struct #packed {
 	ContentLenght:   i32,
 	TransitionCount: i32,
-	Content:         string,
 	Transitions:     []i32,
 }
 
@@ -606,14 +604,17 @@ WriteYapFileRecursive :: proc(
 			scene: YapFileScene
 			scene.SceneNameLenght = i32(len(node.Content))
 			scene.ChildCount = Root.ChildrenCount
-			scene.SceneName = node.Content
+			sceneName := transmute([]u8)node.Content
 
 			_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
 			assert(writeErr == nil, "Failed to write scene header")
+
+			_, writeErr = os.write_ptr(FileHandle^, &sceneName[0], len(sceneName))
+			assert(writeErr == nil, "Failed to write scene name")
 		} else {
 			line: YapFileLine
 
-			line.Content = node.Content
+			content := transmute([]u8)node.Content
 			line.ContentLenght = i32(len(node.Content))
 			line.TransitionCount = 1
 			line.Transitions = {NodeIndex^ + 1}
@@ -621,6 +622,8 @@ WriteYapFileRecursive :: proc(
 
 			_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
 			assert(writeErr == nil, "Failed to write line")
+			_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
+			assert(writeErr == nil, "Failed to write line content")
 		}
 	case NonTerminal:
 	case ParserError:
