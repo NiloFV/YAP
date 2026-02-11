@@ -106,7 +106,7 @@ CompileSettings :: struct {
 }
 
 YAP_VERSION :: 1
-YapCode := FileHeaderCode('Y', 'A', 'P', 'F')
+YapCode := FileHeaderCode('Y', 'A', 'P', '!')
 
 YapFileHeader :: struct #packed {
 	MagicValue: u32,
@@ -120,7 +120,6 @@ YapFileScene :: struct #packed {
 YapFileLine :: struct #packed {
 	ContentLenght:   i32,
 	TransitionCount: i32,
-	Transitions:     []i32,
 }
 
 Arena: MemoryArena
@@ -617,11 +616,13 @@ WriteYapFileRecursive :: proc(
 			content := transmute([]u8)node.Content
 			line.ContentLenght = i32(len(node.Content))
 			line.TransitionCount = 1
-			line.Transitions = {NodeIndex^ + 1}
+			transitions :[]i32= {NodeIndex^ + 1}
 			NodeIndex^ += 1
 
 			_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
 			assert(writeErr == nil, "Failed to write line")
+			_, writeErr = os.write_ptr(FileHandle^, &transitions[0], size_of(i32)*int(line.TransitionCount))
+			assert(writeErr == nil, "Failed to write line transitions")
 			_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
 			assert(writeErr == nil, "Failed to write line content")
 		}
