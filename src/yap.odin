@@ -18,6 +18,7 @@ Terminal :: enum {
 	EndOfLine,
 	EndOfFile,
 	AtSign,
+	HashTag,
 }
 
 NonTerminal :: enum {
@@ -34,6 +35,7 @@ NonTerminal :: enum {
 	BranchBlockEnd,
 	ActorTag,
 	WordLine,
+	Marker,
 }
 
 Token :: struct {
@@ -63,6 +65,7 @@ ParseErrorType :: enum {
 	SceneWithNoLines,
 	SceneWithNoName,
 	EmptyActorTag,
+	MarkerWithNoName,
 }
 
 ParserError :: struct {
@@ -132,6 +135,7 @@ YapFileLeafType :: enum i32 {
 	Unkown   = 0,
 	Line     = 1,
 	SetActor = 2,
+	Marker   = 3,
 }
 YapFileLeaf :: struct #packed {
 	ContentLenght:   i32,
@@ -314,6 +318,10 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
 				PushToken(Arena, Lex, .AtSign, i, i + 1, line, column + 1)
+			case '#':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+				PushToken(Arena, Lex, .HashTag, i, i + 1, line, column + 1)
 			case ' ':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
@@ -391,6 +399,15 @@ PrintLexer :: proc(Lex: ^Lexer) {
 	fmt.println("=================")
 }
 
+CreateParserError :: proc(error: ParseErrorType, tk: ^Token) -> ParserError {
+	return ParserError {
+		Error = error,
+		Column = tk.Column,
+		Line = tk.Line,
+		IndexOnSource = tk.IndexHigh,
+	}
+}
+
 LogError :: proc(Error: ParserError, Lex: ^Lexer) {
 	message: string
 	switch Error.Error {
@@ -405,6 +422,9 @@ LogError :: proc(Error: ParserError, Lex: ^Lexer) {
 		message = "Expected ="
 	case .EmptyActorTag:
 		message = "Expected text after @"
+	case .MarkerWithNoName:
+		message = "Expected word after #"
+
 	}
 	if len(message) > 0 {
 		fmt.printfln(
@@ -423,14 +443,15 @@ Grammar:
 
 S = Scene*
 Scene = _equal WordBlock SceneContent
-SceneContent = Line* | ActorTag*
+SceneContent = Line* | ActorTag* | Marker*
 Line = _dash WordBlock
 WordBlock =  Word* WordBlockEnd
-Word = _word | _dash | _doubleDash | _equal 
+Word = _word | _dash | _doubleDash | _equal | _hashTag | _atSign
 WordBlockEnd = _endOfLine Keyword | _endOfFile
 WordLine = Word* _endOfLine
 Keyword = _dash | _doubleDash | _equal
 ActorTag = _atSign WordLine
+Marker = _hashTag Word _endOfLine
 */
 
 PeekToken :: proc(ParserIn: ^Parser, Offset: i32 = 0) -> (Token, bool) {
@@ -473,12 +494,7 @@ Start :: proc(ParserIn: ^Parser) -> ^TreeNode {
 			root.Children[i] = Scene(ParserIn)
 		} else {
 			errorNode := CreateTreeNode(ParserIn.Arena)
-			errorNode.Value = ParserError {
-				Error         = .NoSceneFound,
-				Column        = tk.Column,
-				Line          = tk.Line,
-				IndexOnSource = tk.IndexHigh,
-			}
+			errorNode.Value = CreateParserError(.NoSceneFound, &tk)
 			root.Children[i] = errorNode
 		}
 	}
@@ -491,12 +507,7 @@ Scene :: proc(ParserIn: ^Parser) -> ^TreeNode {
 	sceneNameBlock := WordBlock(ParserIn)
 	if sceneNameBlock.IndexLow >= sceneNameBlock.IndexHigh {
 		errNode := CreateTreeNode(ParserIn.Arena)
-		errNode.Value = ParserError {
-			Error         = .SceneWithNoName,
-			Column        = tk.Column,
-			Line          = tk.Line,
-			IndexOnSource = tk.IndexHigh,
-		}
+		errNode.Value = CreateParserError(.SceneWithNoName, &tk)
 		return errNode
 	}
 	sceneNode := CreateTreeNode(ParserIn.Arena)
@@ -514,24 +525,23 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 		tk, ok := PeekToken(ParserIn)
 		if ok {
 			node: ^TreeNode
-			if tk.Type == .Dash || tk.Type == .AtSign {
+
+			if tk.Type == .Dash || tk.Type == .AtSign || tk.Type == .HashTag {
 				node = CreateTreeNode(ParserIn.Arena)
 				SceneRoot.ChildrenCount += 1
 
 				if nodes == nil {
 					nodes = node
 				}
+			} else {
+				break
 			}
 
-			if tk.Type == .Dash {
+			#partial switch tk.Type {
+			case .Dash:
 				lineBlock := Line(ParserIn)
 				if lineBlock.IndexLow >= lineBlock.IndexHigh {
-					node.Value = ParserError {
-						Error         = .NoWorldBlockAfterDash,
-						Column        = tk.Column,
-						Line          = tk.Line,
-						IndexOnSource = tk.IndexHigh,
-					}
+					node.Value = CreateParserError(.NoWorldBlockAfterDash, &tk)
 				} else {
 					node.Value = LeafNodeData {
 						Content  = string(
@@ -540,15 +550,10 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 						LeafType = .Line,
 					}
 				}
-			} else if tk.Type == .AtSign {
+			case .AtSign:
 				actorBlock := ActorTag(ParserIn)
 				if actorBlock.IndexLow >= actorBlock.IndexHigh {
-					node.Value = ParserError {
-						Error         = .NoWorldBlockAfterDash,
-						Column        = tk.Column,
-						Line          = tk.Line,
-						IndexOnSource = tk.IndexHigh,
-					}
+					node.Value = CreateParserError(.EmptyActorTag, &tk)
 				} else {
 					node.Value = LeafNodeData {
 						Content  = string(
@@ -557,9 +562,20 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 						LeafType = .SetActor,
 					}
 				}
-			} else {
-				break
+			case .HashTag:
+				markerBlock := Marker(ParserIn)
+				if markerBlock.IndexLow >= markerBlock.IndexHigh {
+					node.Value = CreateParserError(.MarkerWithNoName, &tk)
+				} else {
+					node.Value = LeafNodeData {
+						Content  = string(
+							ParserIn.Lex.Source[markerBlock.IndexLow:markerBlock.IndexHigh],
+						),
+						LeafType = .Marker,
+					}
+				}
 			}
+
 		} else {
 			break
 		}
@@ -632,7 +648,8 @@ Word :: proc(ParserIn: ^Parser) -> Token {
 		   tk.Type == .Dash ||
 		   tk.Type == .DoubleDash ||
 		   tk.Type == .Equal ||
-		   tk.Type == .AtSign {
+		   tk.Type == .AtSign ||
+		   tk.Type == .HashTag {
 			ParserIn.TokenIndex += 1
 			return tk
 		}
@@ -677,6 +694,25 @@ ActorTag :: proc(ParserIn: ^Parser) -> TextBlock {
 	return {}
 }
 
+Marker :: proc(ParserIn: ^Parser) -> TextBlock {
+	oldIndex := ParserIn.TokenIndex
+	next, ok := PeekToken(ParserIn)
+	if ok {
+		if next.Type == .HashTag {
+			ParserIn.TokenIndex += 1
+			word := Word(ParserIn)
+			if word.Type == .Word {
+				_, endOfLineFound := MatchToken(ParserIn, .EndOfLine)
+				if endOfLineFound {
+					return word.Block
+				}
+			}
+		}
+	}
+	ParserIn.TokenIndex = oldIndex
+	return {}
+}
+
 Keyword :: proc(ParserIn: ^Parser) -> bool {
 	tok, ok := PeekToken(ParserIn)
 	if ok {
@@ -684,7 +720,8 @@ Keyword :: proc(ParserIn: ^Parser) -> bool {
 			tok.Type == .Dash ||
 			tok.Type == .DoubleDash ||
 			tok.Type == .Equal ||
-			tok.Type == .AtSign \
+			tok.Type == .AtSign ||
+			tok.Type == .HashTag \
 		)
 	}
 	return false
@@ -718,6 +755,8 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 			fmt.printfln("line( %s )", node.Content)
 		case .SetActor:
 			fmt.printfln("set actor( %s )", node.Content)
+		case .Marker:
+			fmt.printfln("marker( %s )", node.Content)
 		}
 	case NonTerminal:
 		fmt.printfln("\n( %s )", node)

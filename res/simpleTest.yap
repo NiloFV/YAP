@@ -13,7 +13,7 @@ Sheeesh!
 
 -Well, I'll open a chest for you. = Will you keep it secret from everyone else?
 
-//#myMarker
+#myMarker
 
 @ -Actor B
 -Would you please promise?
