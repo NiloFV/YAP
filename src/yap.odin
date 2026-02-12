@@ -19,6 +19,8 @@ Terminal :: enum {
 	EndOfFile,
 	AtSign,
 	HashTag,
+	GreaterThan,
+	JumpTo,
 }
 
 NonTerminal :: enum {
@@ -36,6 +38,7 @@ NonTerminal :: enum {
 	ActorTag,
 	WordLine,
 	Marker,
+	Command,
 }
 
 Token :: struct {
@@ -278,14 +281,15 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 	line: i32
 	column: i32
 
-	slashesFoundThisLine: i32 = 0
+	commentActive: bool
 
 	for i := 0; i < len(Lex.Source); i += 1 {
 		currentCharacter := &Lex.Source[i]
 
-		skip := currentCharacter^ != '\n' && slashesFoundThisLine >= 2
-
-		if skip == false {
+		commentActive |= i > 0 && currentCharacter^ == '/' && Lex.Source[i - 1] == '/'
+		if commentActive {
+			indexLow = i + 1
+		} else {
 			switch currentCharacter^ {
 			case '-':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
@@ -313,7 +317,7 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 				}
 				column = -1
 				line += 1
-				slashesFoundThisLine = 0
+				commentActive = false
 			case '@':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
@@ -322,6 +326,10 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
 				PushToken(Arena, Lex, .HashTag, i, i + 1, line, column + 1)
+			case '>':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+				PushToken(Arena, Lex, .GreaterThan, i, i + 1, line, column + 1)
 			case ' ':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
@@ -330,8 +338,6 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 				indexLow = i + 1
 			case '\t':
 				indexLow = i + 1
-			case '/':
-				slashesFoundThisLine += 1
 			}
 		}
 		column += 1
@@ -443,15 +449,16 @@ Grammar:
 
 S = Scene*
 Scene = _equal WordBlock SceneContent
-SceneContent = Line* | ActorTag* | Marker*
+SceneContent = Line* | ActorTag* | Marker* | Command*
 Line = _dash WordBlock
 WordBlock =  Word* WordBlockEnd
-Word = _word | _dash | _doubleDash | _equal | _hashTag | _atSign
+Word = _word | _dash | _doubleDash | _equal | _hashTag | _atSign | _greaterThan
 WordBlockEnd = _endOfLine Keyword | _endOfFile
 WordLine = Word* _endOfLine
 Keyword = _dash | _doubleDash | _equal
 ActorTag = _atSign WordLine
 Marker = _hashTag Word _endOfLine
+Command = _greaterThan Word Word _endOfLine
 */
 
 PeekToken :: proc(ParserIn: ^Parser, Offset: i32 = 0) -> (Token, bool) {
@@ -536,6 +543,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 			} else {
 				break
 			}
+			
 
 			#partial switch tk.Type {
 			case .Dash:
@@ -575,7 +583,10 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 					}
 				}
 			}
-
+			_,isError := node.Value.(ParserError)
+			if isError{
+				break
+			}
 		} else {
 			break
 		}
@@ -644,19 +655,13 @@ WordLine :: proc(ParserIn: ^Parser) -> TextBlock {
 Word :: proc(ParserIn: ^Parser) -> Token {
 	tk, ok := PeekToken(ParserIn)
 	if ok {
-		if tk.Type == .Word ||
-		   tk.Type == .Dash ||
-		   tk.Type == .DoubleDash ||
-		   tk.Type == .Equal ||
-		   tk.Type == .AtSign ||
-		   tk.Type == .HashTag {
+		if tk.Type == .Word || IsKeyword(tk.Type) {
 			ParserIn.TokenIndex += 1
 			return tk
 		}
 	}
 	return {}
 }
-
 
 WordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
 	next, ok := PeekToken(ParserIn)
@@ -713,18 +718,42 @@ Marker :: proc(ParserIn: ^Parser) -> TextBlock {
 	return {}
 }
 
+Command :: proc(ParserIn: ^Parser) -> TextBlock {
+	oldIndex := ParserIn.TokenIndex
+	next, ok := PeekToken(ParserIn)
+	if ok {
+		if next.Type == .GreaterThan {
+			ParserIn.TokenIndex += 1
+			word := Word(ParserIn)
+			if word.Type == .Word {
+				_, endOfLineFound := MatchToken(ParserIn, .EndOfLine)
+				if endOfLineFound {
+					return word.Block
+				}
+			}
+		}
+	}
+	ParserIn.TokenIndex = oldIndex
+	return {}
+}
+
 Keyword :: proc(ParserIn: ^Parser) -> bool {
 	tok, ok := PeekToken(ParserIn)
 	if ok {
-		return(
-			tok.Type == .Dash ||
-			tok.Type == .DoubleDash ||
-			tok.Type == .Equal ||
-			tok.Type == .AtSign ||
-			tok.Type == .HashTag \
-		)
+		return IsKeyword(tok.Type)
 	}
 	return false
+}
+
+IsKeyword :: #force_inline proc(tokenType: Terminal) -> bool {
+	return(
+		tokenType == .Dash ||
+		tokenType == .DoubleDash ||
+		tokenType == .Equal ||
+		tokenType == .AtSign ||
+		tokenType == .HashTag ||
+		tokenType == .GreaterThan \
+	)
 }
 
 ParsePostProcess :: proc(Root: ^TreeNode, Lex: ^Lexer, Err: ^bool) {
