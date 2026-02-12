@@ -143,7 +143,7 @@ Arena: MemoryArena
 
 main :: proc() {
 
-	if os.args[1] == "-h"{
+	if os.args[1] == "-h" {
 		fmt.println(HELP)
 		return
 	}
@@ -274,47 +274,57 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 	line: i32
 	column: i32
 
+	slashesFoundThisLine: i32 = 0
+
 	for i := 0; i < len(Lex.Source); i += 1 {
 		currentCharacter := &Lex.Source[i]
-		switch currentCharacter^ {
-		case '-':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
-			indexLow = i + 1
-			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
-			if lastTok.Type == .Dash {
-				lastTok.Type = .DoubleDash
-				lastTok.IndexHigh += 1
-			} else {
-				PushToken(Arena, Lex, .Dash, i, i + 1, line, column + 1)
+
+		skip := currentCharacter^ != '\n' && slashesFoundThisLine >= 2
+
+		if skip == false {
+			switch currentCharacter^ {
+			case '-':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+				lastTok := &Lex.Tokens[Lex.TokenCount - 1]
+				if lastTok.Type == .Dash {
+					lastTok.Type = .DoubleDash
+					lastTok.IndexHigh += 1
+				} else {
+					PushToken(Arena, Lex, .Dash, i, i + 1, line, column + 1)
+				}
+			case '=':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+				lastTok := &Lex.Tokens[Lex.TokenCount - 1]
+				PushToken(Arena, Lex, .Equal, i, i + 1, line, column + 1)
+				if i == 0 || lastTok.Type == .EndOfLine {
+					Lex.SceneCount += 1
+				}
+			case '\n':
+				indexLow = i + 1
+				lastTok := &Lex.Tokens[Lex.TokenCount - 1]
+				if lastTok.Type != .EndOfLine {
+					PushToken(Arena, Lex, .EndOfLine, i, i + 1, line, column)
+				}
+				column = -1
+				line += 1
+				slashesFoundThisLine = 0
+			case '@':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+				PushToken(Arena, Lex, .AtSign, i, i + 1, line, column + 1)
+			case ' ':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+			case '\r':
+				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+				indexLow = i + 1
+			case '\t':
+				indexLow = i + 1
+			case '/':
+				slashesFoundThisLine += 1
 			}
-		case '=':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
-			indexLow = i + 1
-			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
-			PushToken(Arena, Lex, .Equal, i, i + 1, line, column + 1)
-			if i == 0 || lastTok.Type == .EndOfLine {
-				Lex.SceneCount += 1
-			}
-		case '\n':
-			indexLow = i + 1
-			lastTok := &Lex.Tokens[Lex.TokenCount - 1]
-			if lastTok.Type != .EndOfLine {
-				PushToken(Arena, Lex, .EndOfLine, i, i + 1, line, column)
-			}
-			column = -1
-			line += 1
-		case '@':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
-			indexLow = i + 1
-			PushToken(Arena, Lex, .AtSign, i, i + 1, line, column + 1)
-		case ' ':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
-			indexLow = i + 1
-		case '\r':
-			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
-			indexLow = i + 1
-		case '\t':
-			indexLow = i + 1
 		}
 		column += 1
 	}
