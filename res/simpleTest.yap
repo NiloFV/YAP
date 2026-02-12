@@ -1,6 +1,8 @@
 =My first 
 scene
 
+@Actor A
+
 -Why did you take my sign? 
 It says plain as day to -just leave me alone! 
 Sheeesh!
@@ -9,7 +11,9 @@ Sheeesh!
 
 -Well, I'll open a chest for you. = Will you keep it secret from everyone else?
 
+@ -Actor B
 -Would you please promise?
+
 
 =My second scene-
 -All right! Take it, thief!

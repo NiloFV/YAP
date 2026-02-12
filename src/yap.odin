@@ -17,6 +17,7 @@ Terminal :: enum {
 	Word,
 	EndOfLine,
 	EndOfFile,
+	AtSign,
 }
 
 NonTerminal :: enum {
@@ -31,6 +32,8 @@ NonTerminal :: enum {
 	BranchBlock,
 	Branch,
 	BranchBlockEnd,
+	ActorTag,
+	WordLine,
 }
 
 Token :: struct {
@@ -59,6 +62,7 @@ ParseErrorType :: enum {
 	NoWorldBlockAfterDash,
 	SceneWithNoLines,
 	SceneWithNoName,
+	EmptyActorTag,
 }
 
 ParserError :: struct {
@@ -81,13 +85,19 @@ TreeNode :: struct {
 }
 
 TreeNodeContent :: union {
-	SceneNodeData,
+	SceneRootNodeData,
+	LeafNodeData,
 	NonTerminal,
 	ParserError,
 }
 
-SceneNodeData :: struct {
-	Content: string,
+SceneRootNodeData :: struct {
+	SceneName: string,
+}
+
+LeafNodeData :: struct {
+	Content:  string,
+	LeafType: YapFileLeafType,
 }
 
 YapOutputFlag :: enum {
@@ -117,9 +127,15 @@ YapFileScene :: struct #packed {
 	SceneNameLenght: i32,
 	ChildCount:      i32,
 }
-YapFileLine :: struct #packed {
+YapFileLeafType :: enum i32 {
+	Unkown   = 0,
+	Line     = 1,
+	SetActor = 2,
+}
+YapFileLeaf :: struct #packed {
 	ContentLenght:   i32,
 	TransitionCount: i32,
+	LeafType:        YapFileLeafType,
 }
 
 Arena: MemoryArena
@@ -187,20 +203,21 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 				fmt.printfln("\n=== Script exported to: %s ===", outputPath)
 			}
 		}
-
-		if Settings.Verbose {
-			counterEnd: win32.LARGE_INTEGER
-			win32.QueryPerformanceCounter(&counterEnd)
-			elapsedSeconds: f32 =
-				(cast(f32)(counterEnd - counterStart)) / (cast(f32)perfCountFrequency)
-
-			fmt.printfln(">> Version: %d", YAP_VERSION)
-			fmt.printfln(">> Time elapsed: %f(s)", elapsedSeconds)
-		}
+		
 		fmt.printfln("\n=== File parsed with success ===")
 
 	} else {
 		fmt.println("\n=== Failed to parse file ===")
+	}
+
+	if Settings.Verbose {
+		counterEnd: win32.LARGE_INTEGER
+		win32.QueryPerformanceCounter(&counterEnd)
+		elapsedSeconds: f32 =
+			(cast(f32)(counterEnd - counterStart)) / (cast(f32)perfCountFrequency)
+
+		fmt.printfln(">> Version: %d", YAP_VERSION)
+		fmt.printfln(">> Time elapsed: %f(s)", elapsedSeconds)
 	}
 }
 
@@ -249,6 +266,10 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 			}
 			column = -1
 			line += 1
+		case '@':
+			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
+			indexLow = i + 1
+			PushToken(Arena, Lex, .AtSign, i, i + 1, line, column + 1)
 		case ' ':
 			TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 			indexLow = i + 1
@@ -335,6 +356,8 @@ LogError :: proc(Error: ParserError, Lex: ^Lexer) {
 		message = "Expected scene name after ="
 	case .NoSceneFound:
 		message = "Expected ="
+	case .EmptyActorTag:
+		message = "Expected text after @"
 	}
 	if len(message) > 0 {
 		fmt.printfln(
@@ -353,12 +376,14 @@ Grammar:
 
 S = Scene*
 Scene = _equal WordBlock SceneContent
-SceneContent = Line*
+SceneContent = Line* | ActorTag*
 Line = _dash WordBlock
 WordBlock =  Word* WordBlockEnd
 Word = _word | _dash | _doubleDash | _equal 
 WordBlockEnd = _endOfLine Keyword | _endOfFile
+WordLine = Word* _endOfLine
 Keyword = _dash | _doubleDash | _equal
+ActorTag = _atSign WordLine
 */
 
 PeekToken :: proc(ParserIn: ^Parser, Offset: i32 = 0) -> (Token, bool) {
@@ -368,6 +393,7 @@ PeekToken :: proc(ParserIn: ^Parser, Offset: i32 = 0) -> (Token, bool) {
 	}
 	return {}, false
 }
+
 MatchToken :: proc(ParserIn: ^Parser, TokenType: Terminal) -> (Token, bool) {
 	tk, ok := PeekToken(ParserIn)
 	if ok && tk.Type == TokenType {
@@ -427,8 +453,8 @@ Scene :: proc(ParserIn: ^Parser) -> ^TreeNode {
 		return errNode
 	}
 	sceneNode := CreateTreeNode(ParserIn.Arena)
-	sceneNode.Value = SceneNodeData {
-		Content = string(ParserIn.Lex.Source[sceneNameBlock.IndexLow:sceneNameBlock.IndexHigh]),
+	sceneNode.Value = SceneRootNodeData {
+		SceneName = string(ParserIn.Lex.Source[sceneNameBlock.IndexLow:sceneNameBlock.IndexHigh]),
 	}
 	SceneContent(ParserIn, sceneNode)
 	return sceneNode
@@ -439,26 +465,53 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 
 	for {
 		tk, ok := PeekToken(ParserIn)
-		if ok && tk.Type == .Dash {
-			node := CreateTreeNode(ParserIn.Arena)
-			SceneRoot.ChildrenCount += 1
+		if ok {
+			node: ^TreeNode
+			if tk.Type == .Dash || tk.Type == .AtSign {
+				node = CreateTreeNode(ParserIn.Arena)
+				SceneRoot.ChildrenCount += 1
 
-			if nodes == nil {
-				nodes = node
+				if nodes == nil {
+					nodes = node
+				}
 			}
 
-			lineBlock := Line(ParserIn)
-			if lineBlock.IndexLow >= lineBlock.IndexHigh {
-				node.Value = ParserError {
-					Error         = .NoWorldBlockAfterDash,
-					Column        = tk.Column,
-					Line          = tk.Line,
-					IndexOnSource = tk.IndexHigh,
+			if tk.Type == .Dash {
+				lineBlock := Line(ParserIn)
+				if lineBlock.IndexLow >= lineBlock.IndexHigh {
+					node.Value = ParserError {
+						Error         = .NoWorldBlockAfterDash,
+						Column        = tk.Column,
+						Line          = tk.Line,
+						IndexOnSource = tk.IndexHigh,
+					}
+				} else {
+					node.Value = LeafNodeData {
+						Content  = string(
+							ParserIn.Lex.Source[lineBlock.IndexLow:lineBlock.IndexHigh],
+						),
+						LeafType = .Line,
+					}
+				}
+			} else if tk.Type == .AtSign {
+				actorBlock := ActorTag(ParserIn)
+				if actorBlock.IndexLow >= actorBlock.IndexHigh {
+					node.Value = ParserError {
+						Error         = .NoWorldBlockAfterDash,
+						Column        = tk.Column,
+						Line          = tk.Line,
+						IndexOnSource = tk.IndexHigh,
+					}
+				} else {
+					node.Value = LeafNodeData {
+						Content  = string(
+							ParserIn.Lex.Source[actorBlock.IndexLow:actorBlock.IndexHigh],
+						),
+						LeafType = .SetActor,
+					}
 				}
 			} else {
-				node.Value = SceneNodeData {
-					Content = string(ParserIn.Lex.Source[lineBlock.IndexLow:lineBlock.IndexHigh]),
-				}
+				break
 			}
 		} else {
 			break
@@ -470,6 +523,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 		SceneRoot.Children[i] = &nodes[i]
 	}
 }
+
 
 Line :: proc(ParserIn: ^Parser) -> TextBlock {
 	tk, ok := MatchToken(ParserIn, .Dash)
@@ -500,16 +554,45 @@ WordBlock :: proc(ParserIn: ^Parser) -> TextBlock {
 	return block
 }
 
+WordLine :: proc(ParserIn: ^Parser) -> TextBlock {
+	block: TextBlock
+	block.IndexLow = I32_MAX
+	block.IndexHigh = 0
+	for {
+		tok, ok := MatchToken(ParserIn, .EndOfLine)
+		if ok {
+			break
+		}
+
+		tok, ok = MatchToken(ParserIn, .EndOfFile)
+		if ok {
+			break
+		}
+
+		word := Word(ParserIn)
+		if word.Type != .Unkown {
+			block.IndexLow = math.min(block.IndexLow, word.IndexLow)
+			block.IndexHigh = math.max(block.IndexHigh, word.IndexHigh)
+		}
+	}
+	return block
+}
+
 Word :: proc(ParserIn: ^Parser) -> Token {
 	tk, ok := PeekToken(ParserIn)
 	if ok {
-		if tk.Type == .Word || tk.Type == .Dash || tk.Type == .DoubleDash || tk.Type == .Equal {
+		if tk.Type == .Word ||
+		   tk.Type == .Dash ||
+		   tk.Type == .DoubleDash ||
+		   tk.Type == .Equal ||
+		   tk.Type == .AtSign {
 			ParserIn.TokenIndex += 1
 			return tk
 		}
 	}
 	return {}
 }
+
 
 WordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
 	next, ok := PeekToken(ParserIn)
@@ -530,10 +613,32 @@ WordBlockEnd :: proc(ParserIn: ^Parser) -> bool {
 	return false
 }
 
+ActorTag :: proc(ParserIn: ^Parser) -> TextBlock {
+	next, ok := PeekToken(ParserIn)
+	if ok {
+		if next.Type == .AtSign {
+			ParserIn.TokenIndex += 1
+			block := WordLine(ParserIn)
+			if block.IndexLow < block.IndexHigh {
+				return block
+			} else {
+				ParserIn.TokenIndex -= 1
+			}
+		}
+	}
+
+	return {}
+}
+
 Keyword :: proc(ParserIn: ^Parser) -> bool {
 	tok, ok := PeekToken(ParserIn)
 	if ok {
-		return tok.Type == .Dash || tok.Type == .DoubleDash || tok.Type == .Equal
+		return(
+			tok.Type == .Dash ||
+			tok.Type == .DoubleDash ||
+			tok.Type == .Equal ||
+			tok.Type == .AtSign \
+		)
 	}
 	return false
 }
@@ -541,7 +646,8 @@ Keyword :: proc(ParserIn: ^Parser) -> bool {
 ParsePostProcess :: proc(Root: ^TreeNode, Lex: ^Lexer, Err: ^bool) {
 
 	switch &node in Root.Value {
-	case SceneNodeData:
+	case LeafNodeData:
+	case SceneRootNodeData:
 	case NonTerminal:
 	case ParserError:
 		LogError(node, Lex)
@@ -556,9 +662,16 @@ ParsePostProcess :: proc(Root: ^TreeNode, Lex: ^Lexer, Err: ^bool) {
 PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 
 	switch node in Root.Value {
-	case SceneNodeData:
-		isSceneRoot := Root.ChildrenCount > 0
-		fmt.printfln("%s( %s )", isSceneRoot ? "\nscene" : "line", node.Content)
+	case SceneRootNodeData:
+		fmt.printfln("\nscene( %s )", node.SceneName)
+	case LeafNodeData:
+		switch node.LeafType {
+		case .Unkown:
+		case .Line:
+			fmt.printfln("line( %s )", node.Content)
+		case .SetActor:
+			fmt.printfln("set actor( %s )", node.Content)
+		}
 	case NonTerminal:
 		fmt.printfln("\n( %s )", node)
 	case ParserError:
@@ -596,36 +709,40 @@ WriteYapFileRecursive :: proc(
 	NodeIndex: ^i32,
 ) {
 	switch &node in Root.Value {
-	case SceneNodeData:
-		if Root.ChildrenCount > 0 {
-			NodeIndex^ = 0
+	case SceneRootNodeData:
+		NodeIndex^ = 0
 
-			scene: YapFileScene
-			scene.SceneNameLenght = i32(len(node.Content))
-			scene.ChildCount = Root.ChildrenCount
-			sceneName := transmute([]u8)node.Content
+		scene: YapFileScene
+		scene.SceneNameLenght = i32(len(node.SceneName))
+		scene.ChildCount = Root.ChildrenCount
+		sceneName := transmute([]u8)node.SceneName
 
-			_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
-			assert(writeErr == nil, "Failed to write scene header")
+		_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
+		assert(writeErr == nil, "Failed to write scene header")
 
-			_, writeErr = os.write_ptr(FileHandle^, &sceneName[0], len(sceneName))
-			assert(writeErr == nil, "Failed to write scene name")
-		} else {
-			line: YapFileLine
+		_, writeErr = os.write_ptr(FileHandle^, &sceneName[0], len(sceneName))
+		assert(writeErr == nil, "Failed to write scene name")
+	case LeafNodeData:
+		line: YapFileLeaf
 
-			content := transmute([]u8)node.Content
-			line.ContentLenght = i32(len(node.Content))
-			line.TransitionCount = 1
-			transitions :[]i32= {NodeIndex^ + 1}
-			NodeIndex^ += 1
+		content := transmute([]u8)node.Content
+		line.ContentLenght = i32(len(node.Content))
+		line.TransitionCount = 1
+		line.LeafType = node.LeafType
+		transitions: []i32 = {NodeIndex^ + 1}
+		NodeIndex^ += 1
 
-			_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
-			assert(writeErr == nil, "Failed to write line")
-			_, writeErr = os.write_ptr(FileHandle^, &transitions[0], size_of(i32)*int(line.TransitionCount))
-			assert(writeErr == nil, "Failed to write line transitions")
-			_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
-			assert(writeErr == nil, "Failed to write line content")
-		}
+		_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
+		assert(writeErr == nil, "Failed to write line")
+		_, writeErr = os.write_ptr(
+			FileHandle^,
+			&transitions[0],
+			size_of(i32) * int(line.TransitionCount),
+		)
+		assert(writeErr == nil, "Failed to write line transitions")
+		_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
+		assert(writeErr == nil, "Failed to write line content")
+
 	case NonTerminal:
 	case ParserError:
 	}
