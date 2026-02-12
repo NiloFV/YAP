@@ -111,6 +111,7 @@ CompileSettings :: struct {
 	OutputFlags: YapOutputFlags,
 	Verbose:     b16,
 	DebugLexer:  b16,
+	DebugParser: b16,
 	Path:        string,
 	FileName:    string,
 }
@@ -142,6 +143,11 @@ Arena: MemoryArena
 
 main :: proc() {
 
+	if os.args[1] == "-h"{
+		fmt.println(HELP)
+		return
+	}
+
 	filePath := os.args[1]
 
 	text, ok := os.read_entire_file(filePath)
@@ -151,14 +157,41 @@ main :: proc() {
 	settings.OutputFlags = {.Binary}
 	settings.Path = FilterPath(filePath)
 	settings.FileName = FilterFileName_NoExtension(filePath)
-	settings.Verbose = true
-	settings.DebugLexer = false
+
+	for i := 2; i < len(os.args); i += 1 {
+		ProcessCompilationArg(os.args[i], &settings)
+	}
+
 	Compile(text, settings)
 
 	fmt.println("\n... press RETURN to continue")
 	buf: [1]u8
 	n, err := os.read(os.stdin, buf[:])
 }
+
+HELP :: `
+Usage: yap.exe myScript.yap (args[...])
+args:
+	-v 		: verbose, more logs and timming
+	-debugLexer 	: print all tokens
+	-debugParser 	: print parse tree
+`
+
+ProcessCompilationArg :: proc(Arg: string, Settings: ^CompileSettings) {
+	if Arg[0] != '-' {
+		return
+	}
+	pureArg := Arg[1:]
+	switch pureArg {
+	case "v":
+		Settings.Verbose = true
+	case "debugLexer":
+		Settings.DebugLexer = true
+	case "debugParser":
+		Settings.DebugParser = true
+	}
+}
+
 
 Compile :: proc(Source: []u8, Settings: CompileSettings) {
 	mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
@@ -193,6 +226,8 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 
 	if parser.TokenIndex == lex.TokenCount && !hasParsingErrors {
 
+		fmt.printfln("\n=== File parsed with success ===")
+
 		if YapOutputFlag.Binary in Settings.OutputFlags {
 			buf: [1024]byte
 			outputPath := fmt.bprintf(buf[:], "%s%s.yapb", Settings.Path, Settings.FileName)
@@ -200,11 +235,13 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 			if err == nil {
 				WriteYapFile(&parser, root, &fileHandle)
 				os.close(fileHandle)
-				fmt.printfln("\n=== Script exported to: %s ===", outputPath)
+				fmt.printfln("\n--- Script exported to: %s ---", outputPath)
 			}
 		}
-		
-		fmt.printfln("\n=== File parsed with success ===")
+
+		if Settings.DebugParser {
+			PrintParseTree(root, &lex)
+		}
 
 	} else {
 		fmt.println("\n=== Failed to parse file ===")
