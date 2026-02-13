@@ -1,4 +1,4 @@
 @echo off
 call build.bat
-START .\build\yap.exe res/simpleTest.yap -v -debugLexer
+START .\build\yap.exe res/simpleTest.yap -v -debugParser
 

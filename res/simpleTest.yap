@@ -7,7 +7,7 @@ scene
 It says plain as day to -just leave me alone! 
 Sheeesh!
 
-//>jumpto myMarker
+>jumpto myMarker
 
 -I heard that you know I used to be a thief, right?
 

@@ -69,6 +69,7 @@ ParseErrorType :: enum {
 	SceneWithNoName,
 	EmptyActorTag,
 	MarkerWithNoName,
+	MisformedCommand,
 }
 
 ParserError :: struct {
@@ -104,6 +105,7 @@ SceneRootNodeData :: struct {
 LeafNodeData :: struct {
 	Content:  string,
 	LeafType: YapFileLeafType,
+	Command:  CommandType,
 }
 
 YapOutputFlag :: enum {
@@ -139,6 +141,11 @@ YapFileLeafType :: enum i32 {
 	Line     = 1,
 	SetActor = 2,
 	Marker   = 3,
+	Command  = 4,
+}
+CommandType :: enum i32 {
+	None = 0,
+	Jump = 1,
 }
 YapFileLeaf :: struct #packed {
 	ContentLenght:   i32,
@@ -287,6 +294,7 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 		currentCharacter := &Lex.Source[i]
 
 		commentActive |= i > 0 && currentCharacter^ == '/' && Lex.Source[i - 1] == '/'
+		commentActive &= currentCharacter^ != '\n'
 		if commentActive {
 			indexLow = i + 1
 		} else {
@@ -357,7 +365,12 @@ TryFlushWordToken :: proc(
 	#any_int Column: i32,
 ) {
 	if ContentHigh > ContentLow {
-		PushToken(Arena, Lex, .Word, ContentLow, ContentHigh, Line, Column)
+		content := string(Lex.Source[ContentLow:ContentHigh])
+		term := Terminal.Word
+		if content == "jumpto" {
+			term = .JumpTo
+		}
+		PushToken(Arena, Lex, term, ContentLow, ContentHigh, Line, Column)
 	}
 }
 
@@ -430,6 +443,8 @@ LogError :: proc(Error: ParserError, Lex: ^Lexer) {
 		message = "Expected text after @"
 	case .MarkerWithNoName:
 		message = "Expected word after #"
+	case .MisformedCommand:
+		message = "Misformed Command. Expected \'> CommandType Argument\'"
 
 	}
 	if len(message) > 0 {
@@ -533,7 +548,10 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 		if ok {
 			node: ^TreeNode
 
-			if tk.Type == .Dash || tk.Type == .AtSign || tk.Type == .HashTag {
+			if tk.Type == .Dash ||
+			   tk.Type == .AtSign ||
+			   tk.Type == .HashTag ||
+			   tk.Type == .GreaterThan {
 				node = CreateTreeNode(ParserIn.Arena)
 				SceneRoot.ChildrenCount += 1
 
@@ -543,7 +561,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 			} else {
 				break
 			}
-			
+
 
 			#partial switch tk.Type {
 			case .Dash:
@@ -582,9 +600,23 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 						LeafType = .Marker,
 					}
 				}
+			case .GreaterThan:
+				commandArg, commandType := Command(ParserIn)
+				if commandArg.IndexLow >= commandArg.IndexHigh {
+					node.Value = CreateParserError(.MisformedCommand, &tk)
+				} else {
+					node.Value = LeafNodeData {
+						Content  = string(
+							ParserIn.Lex.Source[commandArg.IndexLow:commandArg.IndexHigh],
+						),
+						LeafType = .Command,
+						Command  = commandType,
+					}
+				}
+
 			}
-			_,isError := node.Value.(ParserError)
-			if isError{
+			_, isError := node.Value.(ParserError)
+			if isError {
 				break
 			}
 		} else {
@@ -718,23 +750,33 @@ Marker :: proc(ParserIn: ^Parser) -> TextBlock {
 	return {}
 }
 
-Command :: proc(ParserIn: ^Parser) -> TextBlock {
+Command :: proc(ParserIn: ^Parser) -> (TextBlock, CommandType) {
 	oldIndex := ParserIn.TokenIndex
-	next, ok := PeekToken(ParserIn)
+	_, ok := MatchToken(ParserIn, .GreaterThan)
 	if ok {
-		if next.Type == .GreaterThan {
+		command, commandFound := PeekToken(ParserIn)
+		if commandFound {
+			commandType := TokenToCommandType(command.Type)
 			ParserIn.TokenIndex += 1
 			word := Word(ParserIn)
-			if word.Type == .Word {
+			if word.Type == .Word && commandType != .None {
 				_, endOfLineFound := MatchToken(ParserIn, .EndOfLine)
 				if endOfLineFound {
-					return word.Block
+					return word.Block, commandType
 				}
 			}
 		}
 	}
 	ParserIn.TokenIndex = oldIndex
-	return {}
+	return {}, .None
+}
+
+TokenToCommandType :: proc(Term: Terminal) -> CommandType {
+	#partial switch (Term) {
+	case .JumpTo:
+		return .Jump
+	}
+	return .None
 }
 
 Keyword :: proc(ParserIn: ^Parser) -> bool {
@@ -752,7 +794,8 @@ IsKeyword :: #force_inline proc(tokenType: Terminal) -> bool {
 		tokenType == .Equal ||
 		tokenType == .AtSign ||
 		tokenType == .HashTag ||
-		tokenType == .GreaterThan \
+		tokenType == .GreaterThan ||
+		tokenType == .JumpTo \
 	)
 }
 
@@ -786,6 +829,8 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 			fmt.printfln("set actor( %s )", node.Content)
 		case .Marker:
 			fmt.printfln("marker( %s )", node.Content)
+		case .Command:
+			fmt.printfln("%s( %s )", node.Command, node.Content)
 		}
 	case NonTerminal:
 		fmt.printfln("\n( %s )", node)
