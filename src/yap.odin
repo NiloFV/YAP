@@ -49,16 +49,24 @@ Token :: struct {
 }
 
 Lexer :: struct {
-	Source:     []u8,
-	Tokens:     [^]Token,
-	TokenCount: i32,
-	SceneCount: i32,
+	Source:      []u8,
+	Tokens:      [^]Token,
+	TokenCount:  i32,
+	SceneCount:  i32,
+	MarkerCount: i32,
+}
+
+StringIdTuple :: struct {
+	Key:   string,
+	Value: i32,
 }
 
 Parser :: struct {
-	Lex:        ^Lexer,
-	Arena:      ^MemoryArena,
-	TokenIndex: i32,
+	Lex:         ^Lexer,
+	Arena:       ^MemoryArena,
+	Markers:     [^]StringIdTuple,
+	MarkerCount: i32,
+	TokenIndex:  i32,
 }
 
 ParseErrorType :: enum {
@@ -79,6 +87,10 @@ ParserError :: struct {
 	Column:        i32,
 }
 
+ParserPostProcessingData :: struct {
+	HasError:  b32,
+	LeafIndex: i32,
+}
 
 TextBlock :: struct {
 	IndexLow:  i32,
@@ -151,6 +163,7 @@ YapFileLeaf :: struct #packed {
 	ContentLenght:   i32,
 	TransitionCount: i32,
 	LeafType:        YapFileLeafType,
+	Command:         CommandType,
 }
 
 Arena: MemoryArena
@@ -228,17 +241,14 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 	lex.TokenCount = 1
 	Tokenize(&Arena, &lex)
 
-	if Settings.DebugLexer {
-		PrintLexer(&lex)
-	}
 
 	parser: Parser = CreateParser(&lex, &Arena)
 
 	root := Parse(&parser)
-	hasParsingErrors: bool
-	ParsePostProcess(root, &lex, &hasParsingErrors)
+	postData: ParserPostProcessingData
+	ParsePostProcess(root, &parser, &postData)
 
-	if parser.TokenIndex == lex.TokenCount && !hasParsingErrors {
+	if parser.TokenIndex == lex.TokenCount && !postData.HasError {
 
 		fmt.printfln("\n=== File parsed with success ===")
 
@@ -253,12 +263,16 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 			}
 		}
 
-		if Settings.DebugParser {
-			PrintParseTree(root, &lex)
-		}
 
 	} else {
 		fmt.println("\n=== Failed to parse file ===")
+	}
+
+	if Settings.DebugLexer {
+		PrintLexer(&lex)
+	}
+	if Settings.DebugParser {
+		PrintParseTree(root, &lex)
 	}
 
 	if Settings.Verbose {
@@ -267,20 +281,11 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 		elapsedSeconds: f32 =
 			(cast(f32)(counterEnd - counterStart)) / (cast(f32)perfCountFrequency)
 
-		fmt.printfln(">> Version: %d", YAP_VERSION)
+		fmt.printfln("\n>> Version: %d", YAP_VERSION)
 		fmt.printfln(">> Time elapsed: %f(s)", elapsedSeconds)
 	}
 }
 
-
-CreateParser :: proc(Lex: ^Lexer, Arena: ^MemoryArena) -> Parser {
-	parser: Parser
-	parser.Lex = Lex
-	parser.Arena = Arena
-	parser.TokenIndex = 1
-
-	return parser
-}
 
 Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 
@@ -333,7 +338,11 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 			case '#':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
+				lastTok := &Lex.Tokens[Lex.TokenCount - 1]
 				PushToken(Arena, Lex, .HashTag, i, i + 1, line, column + 1)
+				if i == 0 || lastTok.Type == .EndOfLine {
+					Lex.MarkerCount += 1
+				}
 			case '>':
 				TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, i, line, column)
 				indexLow = i + 1
@@ -395,6 +404,7 @@ PushToken :: proc(
 PrintLexer :: proc(Lex: ^Lexer) {
 
 	fmt.printfln("=================\nScene count: %d", Lex.SceneCount)
+	fmt.printfln("Marker count: %d", Lex.MarkerCount)
 
 	for i: i32 = 1; i < Lex.TokenCount; i += 1 {
 		if Lex.Tokens[i].Type == .EndOfLine || Lex.Tokens[i].Type == .EndOfFile {
@@ -500,6 +510,18 @@ CreateTreeNode :: proc(Arena: ^MemoryArena) -> ^TreeNode {
 	return node
 }
 
+CreateParser :: proc(Lex: ^Lexer, Arena: ^MemoryArena) -> Parser {
+	parser: Parser
+	parser.Lex = Lex
+	parser.Arena = Arena
+	parser.TokenIndex = 1
+	parser.MarkerCount = 0
+	parser.Markers = PushMultipointer(Arena, StringIdTuple, Lex.MarkerCount)
+
+	return parser
+}
+
+
 Parse :: proc(ParserIn: ^Parser) -> ^TreeNode {
 	return Start(ParserIn)
 }
@@ -574,6 +596,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[lineBlock.IndexLow:lineBlock.IndexHigh],
 						),
 						LeafType = .Line,
+						Command = .None,
 					}
 				}
 			case .AtSign:
@@ -586,6 +609,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[actorBlock.IndexLow:actorBlock.IndexHigh],
 						),
 						LeafType = .SetActor,
+						Command = .None,
 					}
 				}
 			case .HashTag:
@@ -598,6 +622,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[markerBlock.IndexLow:markerBlock.IndexHigh],
 						),
 						LeafType = .Marker,
+						Command = .None,
 					}
 				}
 			case .GreaterThan:
@@ -799,20 +824,43 @@ IsKeyword :: #force_inline proc(tokenType: Terminal) -> bool {
 	)
 }
 
-ParsePostProcess :: proc(Root: ^TreeNode, Lex: ^Lexer, Err: ^bool) {
+ParsePostProcess :: proc(Root: ^TreeNode, ParserIn: ^Parser, PostData: ^ParserPostProcessingData) {
 
 	switch &node in Root.Value {
 	case LeafNodeData:
+		if node.LeafType == .Marker {
+			PushMarkerTuple(ParserIn, node.Content, PostData.LeafIndex)
+		}
+		PostData.LeafIndex += 1
 	case SceneRootNodeData:
+		PostData.LeafIndex = 0
 	case NonTerminal:
 	case ParserError:
-		LogError(node, Lex)
-		Err^ = true
+		LogError(node, ParserIn.Lex)
+		PostData.HasError = true
 	}
 
 	for i: i32 = 0; i < i32(Root.ChildrenCount); i += 1 {
-		ParsePostProcess(Root.Children[i], Lex, Err)
+		ParsePostProcess(Root.Children[i], ParserIn, PostData)
 	}
+}
+
+PushMarkerTuple :: proc(ParserIn: ^Parser, Name: string, Index: i32) {
+	ParserIn.Markers[ParserIn.MarkerCount] = {
+		Value = Index,
+		Key   = Name,
+	}
+	ParserIn.MarkerCount += 1
+}
+
+//TODO:replace with hash map if this becomes a bottleneck
+MarkerLinearSearch :: proc(ParserIn: ^Parser, Name: string) -> i32 {
+	for i: i32 = 0; i < ParserIn.MarkerCount; i += 1 {
+		if ParserIn.Markers[i].Key == Name {
+			return ParserIn.Markers[i].Value
+		}
+	}
+	return -1
 }
 
 PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
@@ -883,21 +931,31 @@ WriteYapFileRecursive :: proc(
 		_, writeErr = os.write_ptr(FileHandle^, &sceneName[0], len(sceneName))
 		assert(writeErr == nil, "Failed to write scene name")
 	case LeafNodeData:
-		line: YapFileLeaf
+		leaf: YapFileLeaf
 
 		content := transmute([]u8)node.Content
-		line.ContentLenght = i32(len(node.Content))
-		line.TransitionCount = 1
-		line.LeafType = node.LeafType
+		leaf.ContentLenght = i32(len(node.Content))
+		leaf.TransitionCount = 1
+		leaf.LeafType = node.LeafType
+		leaf.Command = node.Command
 		transitions: []i32 = {NodeIndex^ + 1}
+
+		if leaf.LeafType == .Command && node.Command == .Jump {
+			//TODO: change this so we perform a validity check before writing and report error if marker does not exists
+			destination := MarkerLinearSearch(ParserIn, node.Content)
+			if destination >= 0 {
+				transitions[0] = destination
+			}
+		}
+
 		NodeIndex^ += 1
 
-		_, writeErr := os.write_ptr(FileHandle^, &line, size_of(line))
+		_, writeErr := os.write_ptr(FileHandle^, &leaf, size_of(leaf))
 		assert(writeErr == nil, "Failed to write line")
 		_, writeErr = os.write_ptr(
 			FileHandle^,
 			&transitions[0],
-			size_of(i32) * int(line.TransitionCount),
+			size_of(i32) * int(leaf.TransitionCount),
 		)
 		assert(writeErr == nil, "Failed to write line transitions")
 		_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
