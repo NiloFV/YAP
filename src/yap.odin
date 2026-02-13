@@ -150,14 +150,14 @@ YapFileScene :: struct #packed {
 }
 YapFileLeafType :: enum i32 {
 	Unkown   = 0,
-	Line     = 1,
-	SetActor = 2,
-	Marker   = 3,
-	Command  = 4,
+	Line     = 1,	
+	Marker   = 2,
+	Command  = 3,
 }
 CommandType :: enum i32 {
 	None = 0,
 	Jump = 1,
+	SetActor = 2,
 }
 YapFileLeaf :: struct #packed {
 	ContentLenght:   i32,
@@ -608,8 +608,8 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 						Content  = string(
 							ParserIn.Lex.Source[actorBlock.IndexLow:actorBlock.IndexHigh],
 						),
-						LeafType = .SetActor,
-						Command = .None,
+						LeafType = .Command,
+						Command = .SetActor,
 					}
 				}
 			case .HashTag:
@@ -872,9 +872,7 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 		switch node.LeafType {
 		case .Unkown:
 		case .Line:
-			fmt.printfln("line( %s )", node.Content)
-		case .SetActor:
-			fmt.printfln("set actor( %s )", node.Content)
+			fmt.printfln("line( %s )", node.Content)		
 		case .Marker:
 			fmt.printfln("marker( %s )", node.Content)
 		case .Command:
