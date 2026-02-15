@@ -221,9 +221,9 @@ ProcessCompilationArg :: proc(Arg: string, Settings: ^CompileSettings) {
 
 
 Compile :: proc(Source: []u8, Settings: CompileSettings) {
-	mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
-
+	
 	if Arena.Size == 0 {
+		mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 		InitializeArena(&Arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 	} else {
 		ClearArena(&Arena)
