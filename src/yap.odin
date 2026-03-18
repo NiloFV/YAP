@@ -3,6 +3,7 @@ package src
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "base:runtime"
 import win32 "core:sys/windows"
 
 
@@ -137,7 +138,7 @@ CompileSettings :: struct {
 }
 
 YAP_VERSION :: 1
-YapCode := FileHeaderCode('Y', 'A', 'P', '!')
+YapCode := FileHeaderCode ('Y', 'A', 'P', '!')
 
 YapFileHeader :: struct #packed {
 	MagicValue: u32,
@@ -177,8 +178,8 @@ main :: proc() {
 
 	filePath := os.args[1]
 
-	text, ok := os.read_entire_file(filePath)
-	assert(ok, "Failed to read file")
+	text, ok := os.read_entire_file(filePath, context.allocator)
+	assert(ok == os.ERROR_NONE, "Failed to read file")
 
 	settings: CompileSettings
 	settings.OutputFlags = {.Binary}
@@ -223,7 +224,7 @@ ProcessCompilationArg :: proc(Arg: string, Settings: ^CompileSettings) {
 Compile :: proc(Source: []u8, Settings: CompileSettings) {
 	
 	if Arena.Size == 0 {
-		mem := os.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
+		mem := runtime.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 		InitializeArena(&Arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 	} else {
 		ClearArena(&Arena)
@@ -257,7 +258,7 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 			outputPath := fmt.bprintf(buf[:], "%s%s.yapb", Settings.Path, Settings.FileName)
 			fileHandle, err := os.open(outputPath, os.O_CREATE | os.O_TRUNC | os.O_WRONLY)
 			if err == nil {
-				WriteYapFile(&parser, root, &fileHandle)
+				WriteYapFile(&parser, root, fileHandle)
 				os.close(fileHandle)
 				fmt.printfln("\n--- Script exported to: %s ---", outputPath)
 			}
@@ -814,14 +815,11 @@ Keyword :: proc(ParserIn: ^Parser) -> bool {
 
 IsKeyword :: #force_inline proc(tokenType: Terminal) -> bool {
 	return(
-		tokenType == .Dash ||
-		tokenType == .DoubleDash ||
-		tokenType == .Equal ||
-		tokenType == .AtSign ||
-		tokenType == .HashTag ||
-		tokenType == .GreaterThan ||
-		tokenType == .JumpTo \
-	)
+		tokenType != .Unkown &&
+		tokenType != .Word &&
+		tokenType != .EndOfLine &&
+		tokenType != .EndOfFile 	
+	)	
 }
 
 ParsePostProcess :: proc(Root: ^TreeNode, ParserIn: ^Parser, PostData: ^ParserPostProcessingData) {
@@ -890,18 +888,18 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 }
 
 
-FileHeaderCode :: #force_inline proc(a: rune, b: rune, c: rune, d: rune) -> u32 {
+FileHeaderCode :: #force_inline proc  "contextless" (a: rune, b: rune, c: rune, d: rune) -> u32 {
 	return (cast(u32)a << 0) | (cast(u32)b << 8) | (cast(u32)c << 16) | (cast(u32)d << 24)
 }
 
-WriteYapFile :: proc(ParserIn: ^Parser, Root: ^TreeNode, FileHandle: ^os.Handle) {
+WriteYapFile :: proc(ParserIn: ^Parser, Root: ^TreeNode, FileHandle: ^os.File) {
 	header: YapFileHeader
 	header.MagicValue = YapCode
 	header.Version = YAP_VERSION
 	header.SceneCount = ParserIn.Lex.SceneCount
 
 	writeErr: os.Error = nil
-	_, writeErr = os.write_ptr(FileHandle^, &header, size_of(header))
+	_, writeErr = os.write_ptr(FileHandle, &header, size_of(header))
 	assert(writeErr == nil, "Failed to write header")
 
 	nodeIndex: i32 = 0
@@ -911,7 +909,7 @@ WriteYapFile :: proc(ParserIn: ^Parser, Root: ^TreeNode, FileHandle: ^os.Handle)
 WriteYapFileRecursive :: proc(
 	ParserIn: ^Parser,
 	Root: ^TreeNode,
-	FileHandle: ^os.Handle,
+	FileHandle: ^os.File,
 	NodeIndex: ^i32,
 ) {
 	switch &node in Root.Value {
@@ -923,10 +921,10 @@ WriteYapFileRecursive :: proc(
 		scene.ChildCount = Root.ChildrenCount
 		sceneName := transmute([]u8)node.SceneName
 
-		_, writeErr := os.write_ptr(FileHandle^, &scene, size_of(scene))
+		_, writeErr := os.write_ptr(FileHandle, &scene, size_of(scene))
 		assert(writeErr == nil, "Failed to write scene header")
 
-		_, writeErr = os.write_ptr(FileHandle^, &sceneName[0], len(sceneName))
+		_, writeErr = os.write_ptr(FileHandle, &sceneName[0], len(sceneName))
 		assert(writeErr == nil, "Failed to write scene name")
 	case LeafNodeData:
 		leaf: YapFileLeaf
@@ -948,15 +946,15 @@ WriteYapFileRecursive :: proc(
 
 		NodeIndex^ += 1
 
-		_, writeErr := os.write_ptr(FileHandle^, &leaf, size_of(leaf))
+		_, writeErr := os.write_ptr(FileHandle, &leaf, size_of(leaf))
 		assert(writeErr == nil, "Failed to write line")
 		_, writeErr = os.write_ptr(
-			FileHandle^,
+			FileHandle,
 			&transitions[0],
 			size_of(i32) * int(leaf.TransitionCount),
 		)
 		assert(writeErr == nil, "Failed to write line transitions")
-		_, writeErr = os.write_ptr(FileHandle^, &content[0], len(content))
+		_, writeErr = os.write_ptr(FileHandle, &content[0], len(content))
 		assert(writeErr == nil, "Failed to write line content")
 
 	case NonTerminal:
