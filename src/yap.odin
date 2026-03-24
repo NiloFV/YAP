@@ -171,7 +171,7 @@ Arena: MemoryArena
 
 main :: proc() {
 
-	if os.args[1] == "-h" {
+	if len(os.args) == 1 || os.args[1] == "-h" {
 		fmt.println(HELP)
 		return
 	}
@@ -185,6 +185,7 @@ main :: proc() {
 	settings.OutputFlags = {.Binary}
 	settings.Path = FilterPath(filePath)
 	settings.FileName = FilterFileName_NoExtension(filePath)
+	
 
 	for i := 2; i < len(os.args); i += 1 {
 		ProcessCompilationArg(os.args[i], &settings)
@@ -358,8 +359,8 @@ Tokenize :: proc(Arena: ^MemoryArena, Lex: ^Lexer) {
 		}
 		column += 1
 	}
-	TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, len(Lex.Source) - 1, line, column)
-	PushToken(Arena, Lex, .EndOfFile, len(Lex.Source) - 1, len(Lex.Source) - 1, line, column)
+	TryFlushWordToken(Arena, Lex, .EndOfLine, indexLow, len(Lex.Source), line, column)
+	PushToken(Arena, Lex, .EndOfFile, len(Lex.Source), len(Lex.Source), line, column)
 }
 
 

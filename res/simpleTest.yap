@@ -11,9 +11,10 @@ Sheeesh!
 
 -I heard that you know I used to be a thief, right?
 
+#myMarker
+
 -Well, I'll open a chest for you. = Will you keep it secret from everyone else?
 
-#myMarker
 
 @ -Actor B
 -Would you please promise?
@@ -29,4 +30,4 @@ hills where the river begins...
 
 -Link, you should meet her
 at least once. I'm sure you will
-like her.
+like her
