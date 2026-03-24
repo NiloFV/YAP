@@ -1,9 +1,9 @@
 package src
 
+import "base:runtime"
 import "core:fmt"
 import "core:math"
 import "core:os"
-import "base:runtime"
 import win32 "core:sys/windows"
 
 
@@ -138,7 +138,7 @@ CompileSettings :: struct {
 }
 
 YAP_VERSION :: 1
-YapCode := FileHeaderCode ('Y', 'A', 'P', '!')
+YapCode := FileHeaderCode('Y', 'A', 'P', '!')
 
 YapFileHeader :: struct #packed {
 	MagicValue: u32,
@@ -150,14 +150,14 @@ YapFileScene :: struct #packed {
 	ChildCount:      i32,
 }
 YapFileLeafType :: enum i32 {
-	Unkown   = 0,
-	Line     = 1,	
-	Marker   = 2,
-	Command  = 3,
+	Unkown  = 0,
+	Line    = 1,
+	Marker  = 2,
+	Command = 3,
 }
 CommandType :: enum i32 {
-	None = 0,
-	Jump = 1,
+	None     = 0,
+	Jump     = 1,
 	SetActor = 2,
 }
 YapFileLeaf :: struct #packed {
@@ -220,9 +220,8 @@ ProcessCompilationArg :: proc(Arg: string, Settings: ^CompileSettings) {
 	}
 }
 
-
 Compile :: proc(Source: []u8, Settings: CompileSettings) {
-	
+
 	if Arena.Size == 0 {
 		mem := runtime.heap_alloc(int(MEGABYTES(PRE_ALOCATED_MEM_MB)))
 		InitializeArena(&Arena, cast(^u8)mem, uintptr(MEGABYTES(PRE_ALOCATED_MEM_MB)))
@@ -241,7 +240,6 @@ Compile :: proc(Source: []u8, Settings: CompileSettings) {
 	lex.Tokens = PushMultipointer(&Arena, Token, 1, 0)
 	lex.TokenCount = 1
 	Tokenize(&Arena, &lex)
-
 
 	parser: Parser = CreateParser(&lex, &Arena)
 
@@ -597,7 +595,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[lineBlock.IndexLow:lineBlock.IndexHigh],
 						),
 						LeafType = .Line,
-						Command = .None,
+						Command  = .None,
 					}
 				}
 			case .AtSign:
@@ -610,7 +608,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[actorBlock.IndexLow:actorBlock.IndexHigh],
 						),
 						LeafType = .Command,
-						Command = .SetActor,
+						Command  = .SetActor,
 					}
 				}
 			case .HashTag:
@@ -623,7 +621,7 @@ SceneContent :: proc(ParserIn: ^Parser, SceneRoot: ^TreeNode) {
 							ParserIn.Lex.Source[markerBlock.IndexLow:markerBlock.IndexHigh],
 						),
 						LeafType = .Marker,
-						Command = .None,
+						Command  = .None,
 					}
 				}
 			case .GreaterThan:
@@ -818,8 +816,8 @@ IsKeyword :: #force_inline proc(tokenType: Terminal) -> bool {
 		tokenType != .Unkown &&
 		tokenType != .Word &&
 		tokenType != .EndOfLine &&
-		tokenType != .EndOfFile 	
-	)	
+		tokenType != .EndOfFile \
+	)
 }
 
 ParsePostProcess :: proc(Root: ^TreeNode, ParserIn: ^Parser, PostData: ^ParserPostProcessingData) {
@@ -870,7 +868,7 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 		switch node.LeafType {
 		case .Unkown:
 		case .Line:
-			fmt.printfln("line( %s )", node.Content)		
+			fmt.printfln("line( %s )", node.Content)
 		case .Marker:
 			fmt.printfln("marker( %s )", node.Content)
 		case .Command:
@@ -888,7 +886,7 @@ PrintParseTree :: proc(Root: ^TreeNode, Lex: ^Lexer) {
 }
 
 
-FileHeaderCode :: #force_inline proc  "contextless" (a: rune, b: rune, c: rune, d: rune) -> u32 {
+FileHeaderCode :: #force_inline proc "contextless" (a: rune, b: rune, c: rune, d: rune) -> u32 {
 	return (cast(u32)a << 0) | (cast(u32)b << 8) | (cast(u32)c << 16) | (cast(u32)d << 24)
 }
 
